@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.11+, uv, Typer, pytest, Ruff, JSON files, optional Hermes plugin packaging.
 
-**Non-goals for v1:** autonomous code writing, Todoist sync, GitHub PR automation, multi-writer SQLite coordination, Textual TUI, model-driven plan rewriting.
+**Non-goals for v1:** autonomous code writing, GitHub PR automation, multi-writer SQLite coordination, Textual TUI, model-driven plan rewriting, Poseidon-to-Mac push wake-up signals, and unsupervised live side effects.
 
 **Cron deployment profile:**
 
@@ -20,7 +20,11 @@
     "docs/plans/2026-04-26_095545-stateful-dev-01-foundation.md",
     "docs/plans/2026-04-26_095545-stateful-dev-02-plan-and-state.md",
     "docs/plans/2026-04-26_095545-stateful-dev-03-transitions-and-reports.md",
-    "docs/plans/2026-04-26_095545-stateful-dev-04-plugin-and-readiness.md"
+    "docs/plans/2026-04-26_095545-stateful-dev-04-plugin-and-readiness.md",
+    "docs/plans/2026-04-26_121500-poseidon-hitl-05-contracts-and-storage.md",
+    "docs/plans/2026-04-26_121500-poseidon-hitl-06-api-and-discord.md",
+    "docs/plans/2026-04-26_121500-poseidon-hitl-07-client-and-resume.md",
+    "docs/plans/2026-04-26_121500-poseidon-hitl-08-worker-integration-readiness.md"
   ],
   "state_path": "/Users/xlyk/Code/stateful-dev/.agent-state/stateful-dev-worker/state.json",
   "batch_size": 1,
@@ -52,6 +56,10 @@
 2. [Plan and state](2026-04-26_095545-stateful-dev-02-plan-and-state.md) — parse milestone tasks and validate durable JSON state.
 3. [Transitions and reports](2026-04-26_095545-stateful-dev-03-transitions-and-reports.md) — locking, legal transitions, evidence, compact status output.
 4. [Plugin and readiness](2026-04-26_095545-stateful-dev-04-plugin-and-readiness.md) — local Hermes plugin wrapper, docs, smoke proof.
+5. [Poseidon HITL contracts and storage](2026-04-26_121500-poseidon-hitl-05-contracts-and-storage.md) — request/event models, SQLite store, audit, one-time consumption.
+6. [Poseidon API and Discord ingress](2026-04-26_121500-poseidon-hitl-06-api-and-discord.md) — API handlers, node auth, Discord card and interaction normalization.
+7. [Mac mini client and worker resume](2026-04-26_121500-poseidon-hitl-07-client-and-resume.md) — polling client, config, validation-before-consumption, local state recording, bounded subagent context.
+8. [Worker integration and readiness proof](2026-04-26_121500-poseidon-hitl-08-worker-integration-readiness.md) — CLI helpers, docs, fake-Poseidon dry run, Discord dogfood checklist.
 
 ## Gates
 
