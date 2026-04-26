@@ -1,5 +1,10 @@
-from stateful_dev.hitl_discord import render_hitl_request_card
-from stateful_dev.hitl_models import HITLRequest
+import pytest
+
+from stateful_dev.hitl_discord import (
+    operator_event_from_discord_interaction,
+    render_hitl_request_card,
+)
+from stateful_dev.hitl_models import HITLRequest, ValidationError
 
 
 def test_hitl_request_renders_discord_card_payload():
@@ -115,3 +120,111 @@ def test_hitl_request_renders_discord_card_payload():
             "fallback_available": True,
         },
     }
+
+
+def test_discord_modal_submission_creates_operator_event():
+    request = HITLRequest(
+        request_id="hitl_123",
+        worker="stateful-dev-worker",
+        node="mini.lan",
+        project="stateful-dev",
+        project_root="/Users/xlyk/Code/stateful-dev",
+        state_path="/Users/xlyk/Code/stateful-dev/.agent-state/state.json",
+        state_path_hash="sha256:abc123",
+        plan_path="docs/plans/poseidon.md",
+        item_id="poseidon:T4-discord-normalization",
+        request_type="clarification",
+        status="open",
+        question="What should the worker do next?",
+        allowed_actions=["answer", "deny"],
+        constraints=["do not push", "dry-run-only"],
+        payload={},
+        fallback_context="handoff",
+        created_at="2026-04-26T20:00:00Z",
+        expires_at="2026-04-26T21:00:00Z",
+    )
+    interaction = {
+        "id": "interaction_456",
+        "type": "modal_submit",
+        "created_at": "2026-04-26T20:05:00Z",
+        "user": {"id": "discord_789"},
+        "data": {
+            "custom_id": "hitl:hitl_123:answer",
+            "components": [
+                {
+                    "components": [
+                        {
+                            "custom_id": "answer",
+                            "value": "Accept the coverage-only exception.",
+                        }
+                    ]
+                },
+                {
+                    "components": [
+                        {"custom_id": "reason", "value": "Behavior already exists."}
+                    ]
+                },
+            ],
+        },
+    }
+
+    event = operator_event_from_discord_interaction(interaction, request)
+
+    assert event.to_dict() == {
+        "event_id": "discord:interaction_456",
+        "request_id": "hitl_123",
+        "event_type": "answer",
+        "status": "pending",
+        "actor_discord_id": "discord_789",
+        "node": "mini.lan",
+        "worker": "stateful-dev-worker",
+        "item_id": "poseidon:T4-discord-normalization",
+        "state_path_hash": "sha256:abc123",
+        "payload": {
+            "action": "answer",
+            "interaction_id": "interaction_456",
+            "modal_fields": {
+                "answer": "Accept the coverage-only exception.",
+                "reason": "Behavior already exists.",
+            },
+        },
+        "constraints": ["do not push", "dry-run-only"],
+        "created_at": "2026-04-26T20:05:00Z",
+        "consumed_at": None,
+    }
+
+
+def test_discord_interaction_rejects_unsupported_action():
+    request = HITLRequest(
+        request_id="hitl_123",
+        worker="stateful-dev-worker",
+        node="mini.lan",
+        project="stateful-dev",
+        project_root="/Users/xlyk/Code/stateful-dev",
+        state_path="/Users/xlyk/Code/stateful-dev/.agent-state/state.json",
+        state_path_hash="sha256:abc123",
+        plan_path="docs/plans/poseidon.md",
+        item_id="poseidon:T4-discord-normalization",
+        request_type="clarification",
+        status="open",
+        question="What should the worker do next?",
+        allowed_actions=["answer"],
+        constraints=[],
+        payload={},
+        fallback_context="handoff",
+        created_at="2026-04-26T20:00:00Z",
+        expires_at="2026-04-26T21:00:00Z",
+    )
+
+    with pytest.raises(
+        ValidationError, match="unsupported Discord HITL action: approve"
+    ):
+        operator_event_from_discord_interaction(
+            {
+                "id": "interaction_456",
+                "created_at": "2026-04-26T20:05:00Z",
+                "user": {"id": "discord_789"},
+                "data": {"custom_id": "hitl:hitl_123:approve"},
+            },
+            request,
+        )
