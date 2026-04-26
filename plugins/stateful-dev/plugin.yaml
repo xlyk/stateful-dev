@@ -1,0 +1,6 @@
+name: stateful-dev
+description: Stateful development worker utilities
+version: 0.1.0
+tools:
+  - name: stateful_dev_doctor
+    description: Validate a durable worker state file.
