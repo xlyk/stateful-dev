@@ -7,6 +7,12 @@ from pathlib import Path
 
 from stateful_dev.hitl_models import HITLRequest, OperatorEvent
 
+REQUEST_STATUS_OPEN = "open"
+REQUEST_STATUS_CANCELLED = "cancelled"
+REQUEST_STATUS_EXPIRED = "expired"
+EVENT_STATUS_PENDING = "pending"
+EVENT_STATUS_CONSUMED = "consumed"
+
 SCHEMA_STATEMENTS = (
     """
     CREATE TABLE IF NOT EXISTS hitl_requests (
@@ -81,6 +87,65 @@ def _event_json(event: OperatorEvent) -> str:
     return json.dumps(event.to_dict(), sort_keys=True, separators=(",", ":"))
 
 
+def _audit_payload(payload: dict[str, object]) -> str:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def _write_audit(
+    connection: sqlite3.Connection,
+    *,
+    entity_type: str,
+    entity_id: str,
+    action: str,
+    payload: dict[str, object] | None = None,
+    created_at: str | None = None,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO audit_log (
+            entity_type,
+            entity_id,
+            action,
+            payload_json,
+            created_at
+        ) VALUES (?, ?, ?, ?, ?)
+        """,
+        (
+            entity_type,
+            entity_id,
+            action,
+            _audit_payload(payload or {}),
+            created_at or datetime.now(UTC).isoformat(),
+        ),
+    )
+
+
+def _request_with_status(request: HITLRequest, status: str) -> HITLRequest:
+    return HITLRequest.from_dict({**request.to_dict(), "status": status})
+
+
+def get_audit_records(path: str | Path) -> list[dict[str, object]]:
+    init_store(path)
+    with sqlite3.connect(Path(path)) as connection:
+        rows = connection.execute(
+            """
+            SELECT entity_type, entity_id, action, payload_json, created_at
+            FROM audit_log
+            ORDER BY audit_id
+            """
+        ).fetchall()
+    return [
+        {
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "action": action,
+            "payload": json.loads(payload_json),
+            "created_at": created_at,
+        }
+        for entity_type, entity_id, action, payload_json, created_at in rows
+    ]
+
+
 def put_request(path: str | Path, request: HITLRequest) -> None:
     init_store(path)
     payload_json = _request_json(request)
@@ -124,6 +189,14 @@ def put_request(path: str | Path, request: HITLRequest) -> None:
                 request.created_at,
                 request.expires_at,
             ),
+        )
+        _write_audit(
+            connection,
+            entity_type="request",
+            entity_id=request.request_id,
+            action="request_created",
+            payload={"status": request.status},
+            created_at=request.created_at,
         )
         connection.commit()
 
@@ -198,6 +271,14 @@ def put_operator_event(path: str | Path, event: OperatorEvent) -> None:
                 event.consumed_at,
             ),
         )
+        _write_audit(
+            connection,
+            entity_type="event",
+            entity_id=event.event_id,
+            action="event_created",
+            payload={"request_id": event.request_id, "status": event.status},
+            created_at=event.created_at,
+        )
         connection.commit()
 
 
@@ -209,7 +290,11 @@ def list_pending_events(
     request_id: str | None = None,
 ) -> list[OperatorEvent]:
     init_store(path)
-    clauses = ["event.status = 'pending'", "event.node = ?", "request.status = 'open'"]
+    clauses = [
+        f"event.status = '{EVENT_STATUS_PENDING}'",
+        "event.node = ?",
+        f"request.status = '{REQUEST_STATUS_OPEN}'",
+    ]
     params: list[str] = [node]
     if worker is not None:
         clauses.append("event.worker = ?")
@@ -261,7 +346,7 @@ def consume_event(
         consumed_event = OperatorEvent.from_dict(
             {
                 **event.to_dict(),
-                "status": "consumed",
+                "status": EVENT_STATUS_CONSUMED,
                 "consumed_at": consumed_timestamp,
             }
         )
@@ -276,5 +361,90 @@ def consume_event(
             """,
             (consumed_timestamp, payload_json, event_id, node),
         )
+        _write_audit(
+            connection,
+            entity_type="event",
+            entity_id=event_id,
+            action="event_consumed",
+            payload={"node": node, "request_id": event.request_id},
+            created_at=consumed_timestamp,
+        )
         connection.commit()
     return consumed_event
+
+
+def _set_request_terminal_status(
+    path: str | Path,
+    *,
+    request_id: str,
+    status: str,
+    action: str,
+    timestamp: str | None,
+) -> HITLRequest | None:
+    init_store(path)
+    changed_at = timestamp or datetime.now(UTC).isoformat()
+    with sqlite3.connect(Path(path)) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            """
+            SELECT payload_json
+            FROM hitl_requests
+            WHERE request_id = ?
+              AND status = 'open'
+            """,
+            (request_id,),
+        ).fetchone()
+        if row is None:
+            connection.rollback()
+            return None
+        request = HITLRequest.from_dict(json.loads(row[0]))
+        updated = _request_with_status(request, status)
+        connection.execute(
+            """
+            UPDATE hitl_requests
+            SET status = ?, payload_json = ?
+            WHERE request_id = ?
+              AND status = 'open'
+            """,
+            (status, _request_json(updated), request_id),
+        )
+        _write_audit(
+            connection,
+            entity_type="request",
+            entity_id=request_id,
+            action=action,
+            payload={"status": status},
+            created_at=changed_at,
+        )
+        connection.commit()
+    return updated
+
+
+def expire_request(
+    path: str | Path,
+    *,
+    request_id: str,
+    expired_at: str | None = None,
+) -> HITLRequest | None:
+    return _set_request_terminal_status(
+        path,
+        request_id=request_id,
+        status=REQUEST_STATUS_EXPIRED,
+        action="request_expired",
+        timestamp=expired_at,
+    )
+
+
+def cancel_request(
+    path: str | Path,
+    *,
+    request_id: str,
+    cancelled_at: str | None = None,
+) -> HITLRequest | None:
+    return _set_request_terminal_status(
+        path,
+        request_id=request_id,
+        status=REQUEST_STATUS_CANCELLED,
+        action="request_cancelled",
+        timestamp=cancelled_at,
+    )
