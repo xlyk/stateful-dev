@@ -20,7 +20,8 @@
     "docs/plans/2026-04-26_095545-stateful-dev-01-foundation.md",
     "docs/plans/2026-04-26_095545-stateful-dev-02-plan-and-state.md",
     "docs/plans/2026-04-26_095545-stateful-dev-03-transitions-and-reports.md",
-    "docs/plans/2026-04-26_095545-stateful-dev-04-plugin-and-readiness.md"
+    "docs/plans/2026-04-26_095545-stateful-dev-04-plugin-and-readiness.md",
+    "docs/plans/2026-04-26_153000-stateful-dev-05-hardening.md"
   ],
   "state_path": "/Users/xlyk/Code/stateful-dev/.agent-state/stateful-dev-worker/state.json",
   "batch_size": 1,
@@ -52,6 +53,7 @@
 2. [Plan and state](2026-04-26_095545-stateful-dev-02-plan-and-state.md) — parse milestone tasks and validate durable JSON state.
 3. [Transitions and reports](2026-04-26_095545-stateful-dev-03-transitions-and-reports.md) — locking, legal transitions, evidence, compact status output.
 4. [Plugin and readiness](2026-04-26_095545-stateful-dev-04-plugin-and-readiness.md) — local Hermes plugin wrapper, docs, smoke proof.
+5. [Hardening](2026-04-26_153000-stateful-dev-05-hardening.md) — audit-driven fixes for state-write safety, validation semantics, plugin readiness, and disposable smoke docs.
 
 ## Gates
 
