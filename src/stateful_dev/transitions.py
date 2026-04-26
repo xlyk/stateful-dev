@@ -80,7 +80,10 @@ def _require_transition_evidence(
             item, {"focused_green_command", "focused_green_result"}
         ):
             raise IllegalTransitionError("succeeded requires focused GREEN evidence")
-        if not _has_recorded_fields(item, {"full_suite_command", "full_suite_result"}):
+        if not (
+            _has_recorded_fields(item, {"full_suite_command", "full_suite_result"})
+            or _has_fields(evidence, {"full_suite_command", "full_suite_result"})
+        ):
             raise IllegalTransitionError("succeeded requires full suite evidence")
 
 
