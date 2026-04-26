@@ -87,6 +87,10 @@ def _event_json(event: OperatorEvent) -> str:
     return json.dumps(event.to_dict(), sort_keys=True, separators=(",", ":"))
 
 
+def _discord_message_json(message: dict[str, object]) -> str:
+    return json.dumps(message, sort_keys=True, separators=(",", ":"))
+
+
 def _audit_payload(payload: dict[str, object]) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
@@ -211,6 +215,124 @@ def get_request(path: str | Path, request_id: str) -> HITLRequest | None:
     if row is None:
         return None
     return HITLRequest.from_dict(json.loads(row[0]))
+
+
+def put_discord_message(
+    path: str | Path,
+    *,
+    channel_id: str,
+    message_id: str,
+    request_id: str,
+    render_version: int,
+    card_status: str,
+    created_at: str | None = None,
+) -> None:
+    init_store(path)
+    timestamp = created_at or datetime.now(UTC).isoformat()
+    message: dict[str, object] = {
+        "channel_id": channel_id,
+        "message_id": message_id,
+        "request_id": request_id,
+        "render_version": render_version,
+        "card_status": card_status,
+        "created_at": timestamp,
+        "updated_at": None,
+    }
+    payload_json = _discord_message_json(message)
+    with sqlite3.connect(Path(path)) as connection:
+        row = connection.execute(
+            "SELECT payload_json FROM discord_messages WHERE message_id = ?",
+            (message_id,),
+        ).fetchone()
+        if row is not None:
+            if row[0] == payload_json:
+                return
+            raise ValueError(
+                f"duplicate message_id with different payload: {message_id}"
+            )
+        connection.execute(
+            """
+            INSERT INTO discord_messages (
+                message_id,
+                request_id,
+                channel_id,
+                payload_json,
+                created_at,
+                updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (message_id, request_id, channel_id, payload_json, timestamp, None),
+        )
+        _write_audit(
+            connection,
+            entity_type="discord_message",
+            entity_id=message_id,
+            action="discord_message_recorded",
+            payload={"request_id": request_id, "card_status": card_status},
+            created_at=timestamp,
+        )
+        connection.commit()
+
+
+def get_discord_message(
+    path: str | Path,
+    *,
+    message_id: str,
+) -> dict[str, object] | None:
+    init_store(path)
+    with sqlite3.connect(Path(path)) as connection:
+        row = connection.execute(
+            "SELECT payload_json FROM discord_messages WHERE message_id = ?",
+            (message_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return json.loads(row[0])
+
+
+def update_discord_message_status(
+    path: str | Path,
+    *,
+    message_id: str,
+    card_status: str,
+    updated_at: str | None = None,
+) -> dict[str, object] | None:
+    init_store(path)
+    timestamp = updated_at or datetime.now(UTC).isoformat()
+    with sqlite3.connect(Path(path)) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            "SELECT payload_json FROM discord_messages WHERE message_id = ?",
+            (message_id,),
+        ).fetchone()
+        if row is None:
+            connection.rollback()
+            return None
+        message = json.loads(row[0])
+        message["card_status"] = card_status
+        message["updated_at"] = timestamp
+        payload_json = _discord_message_json(message)
+        connection.execute(
+            """
+            UPDATE discord_messages
+            SET payload_json = ?, updated_at = ?
+            WHERE message_id = ?
+            """,
+            (payload_json, timestamp, message_id),
+        )
+        _write_audit(
+            connection,
+            entity_type="discord_message",
+            entity_id=message_id,
+            action="discord_message_status_updated",
+            payload={
+                "request_id": str(message["request_id"]),
+                "card_status": card_status,
+            },
+            created_at=timestamp,
+        )
+        connection.commit()
+    return message
 
 
 def list_open_requests(path: str | Path) -> list[HITLRequest]:

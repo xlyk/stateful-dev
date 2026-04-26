@@ -8,12 +8,15 @@ from stateful_dev.hitl_store import (
     consume_event,
     expire_request,
     get_audit_records,
+    get_discord_message,
     get_request,
     init_store,
     list_open_requests,
     list_pending_events,
+    put_discord_message,
     put_operator_event,
     put_request,
+    update_discord_message_status,
 )
 
 
@@ -166,3 +169,60 @@ def test_expired_request_does_not_return_pending_events(tmp_path):
 
     audit_actions = [record["action"] for record in get_audit_records(db_path)]
     assert audit_actions == ["request_created", "event_created", "request_expired"]
+
+
+def test_discord_message_metadata_round_trips(tmp_path):
+    db_path = tmp_path / "operator-inbox.sqlite3"
+    request = make_request()
+
+    init_store(db_path)
+    put_request(db_path, request)
+    put_discord_message(
+        db_path,
+        channel_id="channel-1",
+        message_id="message-1",
+        request_id="hitl_1",
+        render_version=2,
+        card_status="posted",
+        created_at="2026-04-26T20:10:00Z",
+    )
+
+    assert get_discord_message(db_path, message_id="message-1") == {
+        "channel_id": "channel-1",
+        "message_id": "message-1",
+        "request_id": "hitl_1",
+        "render_version": 2,
+        "card_status": "posted",
+        "created_at": "2026-04-26T20:10:00Z",
+        "updated_at": None,
+    }
+
+    updated = update_discord_message_status(
+        db_path,
+        message_id="message-1",
+        card_status="consumed",
+        updated_at="2026-04-26T20:11:00Z",
+    )
+
+    assert updated == {
+        "channel_id": "channel-1",
+        "message_id": "message-1",
+        "request_id": "hitl_1",
+        "render_version": 2,
+        "card_status": "consumed",
+        "created_at": "2026-04-26T20:10:00Z",
+        "updated_at": "2026-04-26T20:11:00Z",
+    }
+    assert get_discord_message(db_path, message_id="missing") is None
+    assert update_discord_message_status(
+        db_path,
+        message_id="missing",
+        card_status="consumed",
+    ) is None
+
+    audit_actions = [record["action"] for record in get_audit_records(db_path)]
+    assert audit_actions == [
+        "request_created",
+        "discord_message_recorded",
+        "discord_message_status_updated",
+    ]
