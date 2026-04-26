@@ -43,3 +43,19 @@ def test_plugin_exposes_register_function():
     registered = {tool["name"]: tool for tool in ctx.tools}
     assert "stateful_dev_doctor" in registered
     assert callable(registered["stateful_dev_doctor"]["handler"])
+
+
+def test_plugin_manifest_matches_registered_tools():
+    plugin_yaml = Path("plugins/stateful-dev/plugin.yaml")
+    manifest_tool_names = {
+        line.split(":", 1)[1].strip()
+        for line in plugin_yaml.read_text(encoding="utf-8").splitlines()
+        if line.strip().startswith("- name:")
+    }
+
+    tools = load_plugin_tools()
+    ctx = RecordingContext()
+    tools.register(ctx)
+    registered_tool_names = {tool["name"] for tool in ctx.tools}
+
+    assert manifest_tool_names == registered_tool_names

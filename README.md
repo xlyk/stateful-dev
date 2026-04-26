@@ -169,18 +169,18 @@ That is enough to turn a fragile agent workflow into something inspectable and r
 
 ## Current maturity
 
-This is a partially hardened v1.
+This is a hardened v1 for local stateful development workers.
 
-Known gaps under active hardening:
+Verified readiness points:
 
-- CLI write paths need full lock usage and atomic replace before the tool should be trusted with important state.
-- `init` should refuse to overwrite existing state unless explicitly forced.
-- state validation should reject more malformed field types.
-- evidence validation should reject obvious bogus RED/GREEN result strings.
-- the plugin manifest and registered plugin tools should stay mechanically checked.
-- the documented smoke flow should only use disposable state paths.
+- CLI write paths use lock protection and atomic replace.
+- `init` refuses to overwrite existing state unless explicitly forced.
+- state validation rejects malformed top-level and item field types.
+- evidence validation rejects obvious bogus RED/GREEN result strings.
+- plugin manifest and registered plugin tools are mechanically checked.
+- the documented smoke flow uses only disposable state paths.
 
-Until those are complete and verified, treat `stateful-dev` as promising worker infrastructure, not trusted production infrastructure.
+Treat `stateful-dev` as local worker infrastructure. Review plans and gates before using it on important state.
 
 ## Worker safety rules
 

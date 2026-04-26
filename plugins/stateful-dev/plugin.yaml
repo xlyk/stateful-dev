@@ -4,3 +4,5 @@ version: 0.1.0
 tools:
   - name: stateful_dev_doctor
     description: Validate a durable worker state file.
+  - name: stateful_dev_report
+    description: Render a compact stateful development batch report.
