@@ -60,6 +60,68 @@ def _has_red_evidence(item: dict[str, Any]) -> bool:
     return _has_recorded_fields(item, {"focused_red_command", "focused_red_result"})
 
 
+def _result_text(evidence: dict[str, Any] | None, field: str) -> str:
+    if not isinstance(evidence, dict):
+        return ""
+    value = evidence.get(field)
+    return value if isinstance(value, str) else ""
+
+
+def _looks_successful(result: str) -> bool:
+    lowered = result.lower()
+    success_markers = (
+        "exit 0",
+        "exit_code: 0",
+        "exit code 0",
+        "passed",
+        "success",
+        "succeeded",
+        "all checks passed",
+    )
+    return any(marker in lowered for marker in success_markers)
+
+
+def _looks_failed(result: str) -> bool:
+    lowered = result.lower()
+    failure_markers = (
+        "exit 1",
+        "exit 2",
+        "exit_code: 1",
+        "exit_code: 2",
+        "exit code 1",
+        "exit code 2",
+        "failed",
+        "failure",
+        "error",
+        "traceback",
+    )
+    return any(marker in lowered for marker in failure_markers)
+
+
+def _require_result_semantics(
+    target_status: str, evidence: dict[str, Any] | None
+) -> None:
+    red_result = _result_text(evidence, "focused_red_result")
+    if (
+        target_status == "red_verified"
+        and _looks_successful(red_result)
+        and not _looks_failed(red_result)
+    ):
+        raise IllegalTransitionError("RED evidence result appears to be a success")
+
+    if target_status == "green_verified" and _looks_failed(
+        _result_text(evidence, "focused_green_result")
+    ):
+        raise IllegalTransitionError("GREEN evidence result appears to be a failure")
+
+    if target_status == "succeeded" and _looks_failed(
+        _result_text(evidence, "full_suite_result")
+    ):
+        raise IllegalTransitionError(
+            "full suite evidence result appears to be a failure"
+        )
+
+
 def _require_transition_evidence(
     item: dict[str, Any], target_status: str, evidence: dict[str, Any] | None
 ) -> None:
@@ -85,6 +147,8 @@ def _require_transition_evidence(
             or _has_fields(evidence, {"full_suite_command", "full_suite_result"})
         ):
             raise IllegalTransitionError("succeeded requires full suite evidence")
+
+    _require_result_semantics(target_status, evidence)
 
 
 def _apply_evidence_flags(
