@@ -5,6 +5,7 @@ import shutil
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 LOCK_DIR_NAME = "lock"
 LOCK_METADATA_NAME = "metadata.json"
@@ -59,6 +60,14 @@ def _write_metadata(lock_path: Path, run_id: str) -> None:
         "acquired_at": _now().isoformat(),
     }
     _metadata_path(lock_path).write_text(json.dumps(metadata, indent=2) + "\n")
+
+
+def write_json_atomic(path: Path | str, data: dict[str, Any]) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = target.with_name(f"{target.name}.tmp")
+    temp_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    temp_path.replace(target)
 
 
 def acquire_lock(state_dir: Path | str, run_id: str, timeout_minutes: int) -> StateLock:
