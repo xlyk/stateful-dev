@@ -31,3 +31,25 @@ def test_parse_task_headings_with_bodies(tmp_path: Path):
     assert tasks[1].number == 2
     assert tasks[1].title == "Generate stable item IDs"
     assert "**Objective:** Generate IDs." in tasks[1].body
+
+
+def test_item_ids_are_stable_slugs(tmp_path: Path):
+    plan_path = tmp_path / "2026-04-26_095545-stateful-dev-02-plan-and-state.md"
+    plan_path.write_text(
+        "## Task 2: Generate stable item IDs!\n\n"
+        "Body one.\n\n"
+        "## Task 10: Validate state schema & counts\n\n"
+        "Body two.\n",
+        encoding="utf-8",
+    )
+
+    first_parse = parse_plan_tasks(plan_path)
+    second_parse = parse_plan_tasks(plan_path)
+
+    assert [task.item_id for task in first_parse] == [
+        "2026-04-26-095545-stateful-dev-02-plan-and-state:T2-generate-stable-item-ids",
+        "2026-04-26-095545-stateful-dev-02-plan-and-state:T10-validate-state-schema-counts",
+    ]
+    assert [task.item_id for task in second_parse] == [
+        task.item_id for task in first_parse
+    ]
