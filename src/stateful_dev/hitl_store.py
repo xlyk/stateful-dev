@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 
-from stateful_dev.hitl_models import HITLRequest
+from stateful_dev.hitl_models import HITLRequest, OperatorEvent
 
 SCHEMA_STATEMENTS = (
     """
@@ -74,6 +75,10 @@ def init_store(path: str | Path) -> None:
 
 def _request_json(request: HITLRequest) -> str:
     return json.dumps(request.to_dict(), sort_keys=True, separators=(",", ":"))
+
+
+def _event_json(event: OperatorEvent) -> str:
+    return json.dumps(event.to_dict(), sort_keys=True, separators=(",", ":"))
 
 
 def put_request(path: str | Path, request: HITLRequest) -> None:
@@ -147,3 +152,129 @@ def list_open_requests(path: str | Path) -> list[HITLRequest]:
             """
         ).fetchall()
     return [HITLRequest.from_dict(json.loads(row[0])) for row in rows]
+
+
+def put_operator_event(path: str | Path, event: OperatorEvent) -> None:
+    init_store(path)
+    payload_json = _event_json(event)
+    with sqlite3.connect(Path(path)) as connection:
+        row = connection.execute(
+            "SELECT payload_json FROM operator_events WHERE event_id = ?",
+            (event.event_id,),
+        ).fetchone()
+        if row is not None:
+            if row[0] == payload_json:
+                return
+            raise ValueError(
+                f"duplicate event_id with different payload: {event.event_id}"
+            )
+        connection.execute(
+            """
+            INSERT INTO operator_events (
+                event_id,
+                request_id,
+                node,
+                worker,
+                item_id,
+                event_type,
+                status,
+                actor_discord_id,
+                payload_json,
+                created_at,
+                consumed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event.event_id,
+                event.request_id,
+                event.node,
+                event.worker,
+                event.item_id,
+                event.event_type,
+                event.status,
+                event.actor_discord_id,
+                payload_json,
+                event.created_at,
+                event.consumed_at,
+            ),
+        )
+        connection.commit()
+
+
+def list_pending_events(
+    path: str | Path,
+    *,
+    node: str,
+    worker: str | None = None,
+    request_id: str | None = None,
+) -> list[OperatorEvent]:
+    init_store(path)
+    clauses = ["event.status = 'pending'", "event.node = ?", "request.status = 'open'"]
+    params: list[str] = [node]
+    if worker is not None:
+        clauses.append("event.worker = ?")
+        params.append(worker)
+    if request_id is not None:
+        clauses.append("event.request_id = ?")
+        params.append(request_id)
+    where_clause = " AND ".join(clauses)
+    with sqlite3.connect(Path(path)) as connection:
+        rows = connection.execute(
+            f"""
+            SELECT event.payload_json
+            FROM operator_events AS event
+            JOIN hitl_requests AS request
+              ON request.request_id = event.request_id
+            WHERE {where_clause}
+            ORDER BY event.created_at, event.event_id
+            """,
+            params,
+        ).fetchall()
+    return [OperatorEvent.from_dict(json.loads(row[0])) for row in rows]
+
+
+def consume_event(
+    path: str | Path,
+    *,
+    event_id: str,
+    node: str,
+    consumed_at: str | None = None,
+) -> OperatorEvent | None:
+    init_store(path)
+    consumed_timestamp = consumed_at or datetime.now(UTC).isoformat()
+    with sqlite3.connect(Path(path)) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        row = connection.execute(
+            """
+            SELECT payload_json
+            FROM operator_events
+            WHERE event_id = ?
+              AND node = ?
+              AND status = 'pending'
+            """,
+            (event_id, node),
+        ).fetchone()
+        if row is None:
+            connection.rollback()
+            return None
+        event = OperatorEvent.from_dict(json.loads(row[0]))
+        consumed_event = OperatorEvent.from_dict(
+            {
+                **event.to_dict(),
+                "status": "consumed",
+                "consumed_at": consumed_timestamp,
+            }
+        )
+        payload_json = _event_json(consumed_event)
+        connection.execute(
+            """
+            UPDATE operator_events
+            SET status = 'consumed', consumed_at = ?, payload_json = ?
+            WHERE event_id = ?
+              AND node = ?
+              AND status = 'pending'
+            """,
+            (consumed_timestamp, payload_json, event_id, node),
+        )
+        connection.commit()
+    return consumed_event
