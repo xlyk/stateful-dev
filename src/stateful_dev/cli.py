@@ -196,34 +196,52 @@ def transition(
     typer.echo(to_json(payload), nl=False)
 
 
-@app.command()
-def claim(
-    state: Annotated[Path, typer.Option("--state", exists=True, readable=True)],
-    run_id: Annotated[str, typer.Option("--run-id")],
-) -> None:
-    """Atomically select and claim one eligible item or return an existing active item.
+_APP_LOCK_TIMEOUT = 60
 
-    Validates state first; exits non-zero if invalid.
-    Respects fresh locks; exits non-zero if a non-stale lock is held.
-    Returns an active item (in_progress/red_verified/green_verified) as-is.
-    If no active item, atomically claims the first eligible item
-    (failed_retryable then pending), increments its attempts, and records run_id.
-    Emits compact JSON with claimed flag, item, and run_id.
+
+def _claim_one_item(
+    data: dict[str, Any],
+    state: Path,
+    run_id: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Atomically claim one eligible item or return an existing active item.
+
+    Shared primitive used by both `claim` CLI and `cron_gate`.
+    Acquires the state lock, validates HITL preconditions, selects or resumes
+    an item, records active_run_id and claimed_at, recomputes counts, and
+    writes the updated state.
+
+    Args:
+        data: already-loaded and validated state dict
+        state: path to the state file (for lock acquisition)
+        run_id: run identifier for this invocation
+
+    Returns:
+        (chosen_item, updated_data) where chosen_item is the claimed dict
+        (with id/title/status/attempts populated), or (None, updated_data)
+        if no active or eligible item exists.
     """
-    from stateful_dev.locking import FreshLockError, LockError
+    from stateful_dev.hitl_poseidon import hitl_enabled, hitl_poll_ok_for_run
+    from stateful_dev.locking import acquire_lock, release_lock
     from stateful_dev.state import validate_state
     from stateful_dev.status import ACTIVE_STATUSES, ELIGIBLE_STATUSES
 
-    data = _load_json(state)
+    data["state_path"] = str(state)
     validation = validate_state(data)
     if not validation.ok:
-        for err in validation.errors:
-            typer.echo(f"state error: {err}")
-        raise typer.Exit(1)
+        raise ValueError("invalid state: " + "; ".join(validation.errors))
+
+    # HITL enforcement: fail closed when HITL is required but no successful poll
+    if hitl_enabled(data):
+        hitl_ok, hitl_reason = hitl_poll_ok_for_run(data, run_id)
+        if not hitl_ok:
+            raise ValueError("hitl poll required: " + hitl_reason)
 
     lock = None
     try:
-        lock = acquire_lock(state.parent, _lock_run_id("claim"), timeout_minutes=60)
+        lock = acquire_lock(
+            state.parent, _lock_run_id("claim"), timeout_minutes=_APP_LOCK_TIMEOUT
+        )
 
         items = data.get("items", [])
         active = next(
@@ -235,39 +253,31 @@ def claim(
             None,
         )
         if active is not None:
-            payload = {
-                "claimed": True,
-                "item": {
+            return (
+                {
                     "id": active.get("id"),
                     "title": active.get("title"),
                     "status": active.get("status"),
                     "attempts": active.get("attempts", 0),
                 },
-                "run_id": run_id,
-            }
-            typer.echo(to_json(payload), nl=False)
-            return
+                data,
+            )
 
         eligible_candidates = [
             item for item in items
             if isinstance(item, dict) and item.get("status") in ELIGIBLE_STATUSES
         ]
         if not eligible_candidates:
-            payload = {
-                "claimed": False,
-                "item": None,
-                "run_id": run_id,
-            }
-            typer.echo(to_json(payload), nl=False)
-            return
+            return (None, data)
 
-        # Select in priority order: failed_retryable first, then pending
         def _priority(item: dict) -> int:
             return 0 if item.get("status") == "failed_retryable" else 1
 
         chosen = min(eligible_candidates, key=_priority)
         chosen["status"] = "in_progress"
         chosen["attempts"] = chosen.get("attempts", 0) + 1
+        chosen["active_run_id"] = run_id
+        chosen["claimed_at"] = datetime.now(UTC).isoformat()
 
         # Recompute counts
         counts = {s: 0 for s in VALID_STATUSES}
@@ -280,23 +290,50 @@ def claim(
 
         _write_json(state, data)
 
-        payload = {
-            "claimed": True,
-            "item": {
+        return (
+            {
                 "id": chosen.get("id"),
                 "title": chosen.get("title"),
                 "status": chosen.get("status"),
                 "attempts": chosen.get("attempts", 0),
             },
-            "run_id": run_id,
-        }
-        typer.echo(to_json(payload), nl=False)
+            data,
+        )
 
-    except (FreshLockError, LockError) as error:
-        _exit_lock_error(error)
     finally:
         if lock is not None:
             release_lock(lock)
+
+
+@app.command()
+def claim(
+    state: Annotated[Path, typer.Option("--state", exists=True, readable=True)],
+    run_id: Annotated[str, typer.Option("--run-id")],
+) -> None:
+    """Atomically select and claim one eligible item or return an existing active item.
+
+    Validates state first; exits non-zero if invalid.
+    Respects fresh locks; exits non-zero if a non-stale lock is held.
+    Returns an active item (in_progress/red_verified/green_verified) as-is.
+    If no active item, atomically claims the first eligible item
+    (failed_retryable then pending), increments its attempts, and records run_id.
+    When HITL is enabled and poll_policy=required, refuses to claim new work
+    unless the current run has a successful HITL poll marker.
+    Emits compact JSON with claimed flag, item, and run_id.
+    """
+    try:
+        data = _load_json(state)
+        item, _ = _claim_one_item(data, state, run_id)
+        if item is None:
+            payload = {"claimed": False, "item": None, "run_id": run_id}
+        else:
+            payload = {"claimed": True, "item": item, "run_id": run_id}
+        typer.echo(to_json(payload), nl=False)
+    except (FreshLockError, LockError) as error:
+        _exit_lock_error(error)
+    except ValueError as exc:
+        typer.echo(str(exc))
+        raise typer.Exit(1) from exc
 
 
 @app.command()
@@ -323,9 +360,15 @@ def cron_gate(
     import subprocess
     from datetime import UTC, timedelta
 
-    from stateful_dev.locking import LOCK_DIR_NAME, LOCK_METADATA_NAME, _read_metadata
+    from stateful_dev.locking import (
+        LOCK_DIR_NAME,
+        LOCK_METADATA_NAME,
+        FreshLockError,
+        LockError,
+        _read_metadata,
+    )
     from stateful_dev.state import validate_state
-    from stateful_dev.status import ELIGIBLE_STATUSES, build_status
+    from stateful_dev.status import build_status
 
     # 1. Load and validate state
     data = _load_json(state)
@@ -463,14 +506,16 @@ def cron_gate(
             message=f"Continuing {iid} ({istatus})",
         )
     else:
-        # No active item but work exists — claim one
-        items = data.get("items", [])
-        eligible = [
-            item for item in items
-            if isinstance(item, dict) and item.get("status") in ELIGIBLE_STATUSES
-        ]
-        if not eligible:
-            # Race: item became terminal between status check and now
+        # No active item but work exists — claim one via the shared primitive
+        try:
+            claimed_item, data = _claim_one_item(data, state, run_id)
+        except (FreshLockError, LockError) as error:
+            _exit_lock_error(error)
+        except ValueError as exc:
+            typer.echo(str(exc))
+            raise typer.Exit(1) from exc
+
+        if claimed_item is None:
             payload = _build_payload(
                 "skip",
                 wake_agent=False,
@@ -479,25 +524,8 @@ def cron_gate(
                 complete=True,
             )
         else:
-            # Claim the first eligible item
-            chosen = min(
-                eligible,
-                key=lambda i: 0 if i.get("status") == "failed_retryable" else 1,
-            )
-            chosen["status"] = "in_progress"
-            chosen["attempts"] = chosen.get("attempts", 0) + 1
-
-            # Recompute counts
-            counts = {s: 0 for s in VALID_STATUSES}
-            for item in data.get("items", []):
-                s = item.get("status")
-                if s in counts:
-                    counts[s] += 1
-            data["counts"] = counts
-            data["updated_at"] = datetime.now(UTC).isoformat()
-            _write_json(state, data)
-
-            iid, ititle, _ = _item_fields(chosen)
+            iid = claimed_item.get("id")
+            ititle = claimed_item.get("title")
             payload = _build_payload(
                 "wake",
                 wake_agent=True,
@@ -507,6 +535,32 @@ def cron_gate(
                 complete=False,
                 message=f"Claimed {iid} for {run_id}",
             )
+
+    # Non-zero exit for blocker/error triggers Hermes notification
+    if payload.get("mode") in ("blocker", "error"):
+        if as_json:
+            typer.echo(to_json(payload), nl=False)
+        else:
+            # Human-readable summary lines, then JSON on the last line
+            item_line = (
+                f"item: {payload['item_id']} ({payload['item_status']})"
+                if payload["item_id"]
+                else "item: none"
+            )
+            summary_lines = [
+                f"worker: {worker_id}",
+                f"run: {run_id}",
+                f"mode: {payload['mode']}",
+                f"wakeAgent: {payload['wakeAgent']}",
+                item_line,
+                f"complete: {payload['complete']}",
+            ]
+            if payload["blocker"]:
+                summary_lines.append(f"blocker: {payload['blocker']}")
+            for line in summary_lines:
+                typer.echo(line)
+            typer.echo(to_json(payload), nl=False)
+        raise typer.Exit(1)
 
     if as_json:
         typer.echo(to_json(payload), nl=False)
@@ -539,3 +593,136 @@ def report(
 ) -> None:
     """Render a compact batch report from state and run summary JSON."""
     typer.echo(render_batch_report(_load_json(state), _load_json(summary)), nl=False)
+
+
+hitl_app = typer.Typer(help="Poseidon HITL polling commands.")
+
+
+@hitl_app.command("poll-before-run")
+def hitl_poll_before_run(
+    state: Annotated[Path, typer.Option("--state", exists=True, readable=True)],
+    run_id: Annotated[str, typer.Option("--run-id")],
+    base_url: Annotated[str, typer.Option("--base-url")],
+    node_token_file: Annotated[
+        Path, typer.Option("--node-token-file", exists=True, readable=True)
+    ],
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Poll Poseidon for active HITL events and stage them locally.
+
+    Reads the node token from the specified file.
+    Validates events against HITL state metadata (worker_id, state_path_hash).
+    Stages valid events under .agent-state/<worker>/hitl-inbox/<request_id>/.
+    Writes a run marker recording the poll result.
+    Fails closed when HITL poll_policy=required and the poll fails.
+    """
+
+    from stateful_dev.hitl_poseidon import (
+        compute_state_path_hash,
+        hitl_enabled,
+        poll_poseidon,
+        stage_event,
+    )
+    from stateful_dev.locking import (
+        FreshLockError,
+        LockError,
+        acquire_lock,
+        release_lock,
+    )
+
+    # Load state
+    data = _load_json(state)
+    data["state_path"] = str(state)
+    validation = validate_state(data)
+    if not validation.ok:
+        for err in validation.errors:
+            typer.echo(f"state error: {err}")
+        raise typer.Exit(1)
+
+    if not hitl_enabled(data):
+        typer.echo("HITL is not enabled for this worker")
+        raise typer.Exit(0)
+
+    hitl = data["hitl"]
+    node_id = hitl.get("node_id", "")
+    worker_id = hitl.get("worker_id", "")
+    state_path_hash = hitl.get("state_path_hash") or compute_state_path_hash(str(state))
+    active_requests = hitl.get("active_requests", [])
+    active_request_ids = [
+        r.get("request_id") for r in active_requests
+        if isinstance(r, dict) and r.get("request_id")
+    ]
+
+    # Read node token
+    try:
+        node_token = node_token_file.read_text(encoding="utf-8").strip()
+    except OSError as e:
+        typer.echo(f"failed to read node token file: {e}")
+        raise typer.Exit(1) from None
+
+    # Acquire lock for the polling operation
+    lock = None
+    try:
+        lock = acquire_lock(
+            state.parent, _lock_run_id("hitl-poll"), timeout_minutes=5
+        )
+
+        result = poll_poseidon(
+            base_url=base_url,
+            node_token=node_token,
+            node_id=node_id,
+            worker_id=worker_id,
+            state_path_hash=state_path_hash,
+            active_request_ids=active_request_ids,
+        )
+
+        # Stage valid events locally
+        inbox_dir = state.parent / "hitl-inbox"
+        staged_count = 0
+        for event in result.events:
+            try:
+                stage_event(event, inbox_dir)
+                staged_count += 1
+            except OSError as e:
+                typer.echo(f"warning: failed to stage event {event.event_id}: {e}")
+
+        # Write run marker
+        runs_dir = state.parent / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        run_marker = runs_dir / f"{run_id}.json"
+        marker = {
+            "run_id": run_id,
+            "hitl_poll": {
+                "required": True,
+                "ok": result.ok,
+                "completed_at": datetime.now(UTC).isoformat(),
+                "worker_id": worker_id,
+                "request_ids": result.request_ids_found,
+                "event_count": len(result.events),
+                "staged_event_count": staged_count,
+                "error": result.error,
+            },
+        }
+        _write_json(run_marker, marker)
+
+        if as_json:
+            typer.echo(to_json({
+                "ok": result.ok,
+                "events_staged": staged_count,
+                "run_id": run_id,
+                "error": result.error,
+            }), nl=False)
+        else:
+            if result.ok:
+                typer.echo(f"HITL poll ok: {staged_count} event(s) staged")
+            else:
+                typer.echo(f"HITL poll failed: {result.error}")
+
+    except (FreshLockError, LockError) as error:
+        _exit_lock_error(error)
+    finally:
+        if lock is not None:
+            release_lock(lock)
+
+
+app.add_typer(hitl_app, name="hitl")

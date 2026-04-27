@@ -252,3 +252,40 @@ def test_claim_resumes_failed_retryable(tmp_path: Path) -> None:
     t1 = saved["items"][0]
     assert t1["status"] == "in_progress"
     assert t1["attempts"] == 2
+
+
+def test_claim_records_active_run_id_and_claimed_at(tmp_path: Path) -> None:
+    """When claiming a pending item, active_run_id and claimed_at are persisted."""
+    state_path = tmp_path / "state.json"
+    _write_state(
+        state_path,
+        [
+            {
+                "id": "plan:T1-test",
+                "title": "Test item",
+                "status": "pending",
+                "attempts": 0,
+            }
+        ],
+    )
+    run_id = "cron-run-xyz-123"
+
+    result = CliRunner().invoke(
+        app,
+        ["claim", "--state", str(state_path), "--run-id", run_id],
+    )
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["claimed"] is True
+    assert payload["item"]["id"] == "plan:T1-test"
+
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    t1 = saved["items"][0]
+    assert t1["status"] == "in_progress"
+    assert t1.get("active_run_id") == run_id
+    assert t1.get("claimed_at") is not None
+    # claimed_at should be a parseable ISO timestamp
+    from datetime import datetime
+    parsed = datetime.fromisoformat(t1["claimed_at"])
+    assert parsed.tzinfo is not None  # must be timezone-aware UTC

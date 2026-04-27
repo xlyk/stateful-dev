@@ -11,12 +11,18 @@ Acceptance criteria:
 """
 import json
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from typer.testing import CliRunner
 
 from stateful_dev.cli import app
-from stateful_dev.locking import acquire_lock, release_lock
+from stateful_dev.locking import (
+    LOCK_DIR_NAME,
+    LOCK_METADATA_NAME,
+    acquire_lock,
+    release_lock,
+)
 
 
 def _write_state(
@@ -239,7 +245,7 @@ class TestCronGateBlocker:
                 "--run-id", "run-abc",
             ],
         )
-        assert result.exit_code == 0  # cron-gate itself succeeds; blocker is in payload
+        assert result.exit_code == 1  # non-zero triggers Hermes notification
         payload = _last_json_line(result.output)
         assert payload["wakeAgent"] is False
         assert payload["mode"] == "blocker"
@@ -264,7 +270,7 @@ class TestCronGateBlocker:
                     "--run-id", "run-abc",
                 ],
             )
-            assert result.exit_code == 0
+            assert result.exit_code == 1
             payload = _last_json_line(result.output)
             assert payload["wakeAgent"] is False
             assert payload["mode"] == "blocker"
@@ -302,7 +308,7 @@ class TestCronGateBlocker:
                     "--run-id", "run-abc",
                 ],
             )
-            assert result.exit_code == 0
+            assert result.exit_code == 1
             payload = _last_json_line(result.output)
             assert payload["wakeAgent"] is False
             assert payload["mode"] == "blocker"
@@ -310,6 +316,122 @@ class TestCronGateBlocker:
             assert "git" in blk or "dirty" in blk
         finally:
             dirty_file.unlink(missing_ok=True)
+
+
+class TestCronGateBlockerNonZeroExit:
+    """Blocker/error mode must exit non-zero to trigger Hermes notification."""
+
+    def test_blocker_state_invalid_exits_nonzero(self, tmp_path: Path) -> None:
+        state_path = tmp_path / "state.json"
+        path_str = str(state_path)
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text('{"items": []}', encoding="utf-8")  # invalid: no items
+
+        result = CliRunner().invoke(
+            app,
+            [
+                "cron-gate",
+                "--state", path_str,
+                "--project-root", str(tmp_path),
+                "--worker-id", "test-worker",
+                "--run-id", "run-abc",
+            ],
+        )
+        assert result.exit_code != 0
+        payload = _last_json_line(result.output)
+        assert payload["wakeAgent"] is False
+        assert payload["mode"] == "blocker"
+
+    def test_blocker_lock_held_exits_nonzero(self, tmp_path: Path) -> None:
+        state_path = tmp_path / "state.json"
+        _write_state(
+            state_path,
+            [{"id": "plan:T1", "title": "Work", "status": "pending"}],
+        )
+        lock = acquire_lock(state_path.parent, run_id="other-run", timeout_minutes=60)
+        try:
+            result = CliRunner().invoke(
+                app,
+                [
+                    "cron-gate",
+                    "--state", str(state_path),
+                    "--project-root", str(tmp_path),
+                    "--worker-id", "test-worker",
+                    "--run-id", "run-abc",
+                ],
+            )
+            assert result.exit_code != 0
+            payload = _last_json_line(result.output)
+            assert payload["wakeAgent"] is False
+            assert payload["mode"] == "blocker"
+            assert "lock" in payload["blocker"].lower()
+        finally:
+            release_lock(lock)
+
+    def test_blocker_git_dirty_exits_nonzero(self, tmp_path: Path) -> None:
+        state_path = tmp_path / "state.json"
+        _write_state(
+            state_path,
+            [{"id": "plan:T1", "title": "Work", "status": "pending"}],
+        )
+        subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@test.com"],
+            cwd=tmp_path, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"],
+            cwd=tmp_path, capture_output=True,
+        )
+        dirty_file = tmp_path / "dirty.txt"
+        dirty_file.write_text("uncommitted", encoding="utf-8")
+        try:
+            result = CliRunner().invoke(
+                app,
+                [
+                    "cron-gate",
+                    "--state", str(state_path),
+                    "--project-root", str(tmp_path),
+                    "--worker-id", "test-worker",
+                    "--run-id", "run-abc",
+                ],
+            )
+            assert result.exit_code != 0
+            payload = _last_json_line(result.output)
+            assert payload["wakeAgent"] is False
+            assert payload["mode"] == "blocker"
+            blk = payload["blocker"].lower()
+            assert "git" in blk or "dirty" in blk
+        finally:
+            dirty_file.unlink(missing_ok=True)
+
+    def test_blocker_json_still_printed_before_nonzero_exit(
+        self, tmp_path: Path
+    ) -> None:
+        """JSON payload must appear in stdout even when exiting non-zero."""
+        state_path = tmp_path / "state.json"
+        path_str = str(state_path)
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text('{"items": []}', encoding="utf-8")  # invalid: no items
+
+        result = CliRunner().invoke(
+            app,
+            [
+                "cron-gate",
+                "--state", path_str,
+                "--project-root", str(tmp_path),
+                "--worker-id", "test-worker",
+                "--run-id", "run-abc",
+            ],
+        )
+        assert result.exit_code != 0
+        # The JSON payload should be the last line of output
+        lines = [line.strip() for line in result.output.splitlines() if line.strip()]
+        last_line = lines[-1]
+        payload = json.loads(last_line)
+        assert payload["mode"] == "blocker"
+        assert payload["wakeAgent"] is False
+        assert "blocker" in payload
 
 
 class TestCronGateOutputFormat:
@@ -372,6 +494,100 @@ class TestCronGateOutputFormat:
         payload = _last_json_line(result.output)
         assert payload["mode"] == "skip"
         assert payload["complete"] is True
+
+
+class TestCronGateStaleLock:
+    """Stale locks should be treated as not held — cron_gate proceeds normally."""
+
+    def test_stale_lock_allows_work(self, tmp_path: Path) -> None:
+        """A lock acquired > 60 min ago should be treated as stale and not block."""
+        state_path = tmp_path / "state.json"
+        _write_state(
+            state_path,
+            [{"id": "plan:T1", "title": "Work", "status": "pending"}],
+        )
+        # Create a stale lock: lock dir + metadata with acquired_at 90 min ago
+        lock_path = state_path.parent / LOCK_DIR_NAME
+        lock_path.mkdir(parents=True, exist_ok=True)
+        stale_time = datetime.now(UTC) - timedelta(minutes=90)
+        metadata = {
+            "run_id": "stale-run",
+            "acquired_at": stale_time.isoformat(),
+        }
+        (lock_path / LOCK_METADATA_NAME).write_text(json.dumps(metadata) + "\n")
+
+        result = CliRunner().invoke(
+            app,
+            [
+                "cron-gate",
+                "--state", str(state_path),
+                "--project-root", str(tmp_path),
+                "--worker-id", "test-worker",
+                "--run-id", "run-abc",
+            ],
+        )
+        assert result.exit_code == 0
+        payload = _last_json_line(result.output)
+        assert payload["wakeAgent"] is True
+        assert payload["mode"] == "wake"
+        assert payload["item_id"] == "plan:T1"
+        assert payload["item_status"] == "in_progress"  # claim transitions
+
+    def test_stale_lock_with_missing_metadata(self, tmp_path: Path) -> None:
+        """Lock dir exists but metadata.json is missing — treat as stale, proceed."""
+        state_path = tmp_path / "state.json"
+        _write_state(
+            state_path,
+            [{"id": "plan:T1", "title": "Work", "status": "pending"}],
+        )
+        # Create lock dir WITHOUT metadata.json
+        lock_path = state_path.parent / LOCK_DIR_NAME
+        lock_path.mkdir(parents=True, exist_ok=True)
+
+        result = CliRunner().invoke(
+            app,
+            [
+                "cron-gate",
+                "--state", str(state_path),
+                "--project-root", str(tmp_path),
+                "--worker-id", "test-worker",
+                "--run-id", "run-abc",
+            ],
+        )
+        assert result.exit_code == 0
+        payload = _last_json_line(result.output)
+        assert payload["wakeAgent"] is True
+        assert payload["mode"] == "wake"
+        assert payload["item_id"] == "plan:T1"
+
+    def test_stale_lock_with_malformed_metadata(self, tmp_path: Path) -> None:
+        """Lock dir exists but metadata.json is not valid JSON — treat as stale."""
+        state_path = tmp_path / "state.json"
+        _write_state(
+            state_path,
+            [{"id": "plan:T1", "title": "Work", "status": "pending"}],
+        )
+        # Create lock dir with malformed metadata.json
+        lock_path = state_path.parent / LOCK_DIR_NAME
+        lock_path.mkdir(parents=True, exist_ok=True)
+        bad_metadata = "not valid json {{{{"
+        (lock_path / LOCK_METADATA_NAME).write_text(bad_metadata, encoding="utf-8")
+
+        result = CliRunner().invoke(
+            app,
+            [
+                "cron-gate",
+                "--state", str(state_path),
+                "--project-root", str(tmp_path),
+                "--worker-id", "test-worker",
+                "--run-id", "run-abc",
+            ],
+        )
+        assert result.exit_code == 0
+        payload = _last_json_line(result.output)
+        assert payload["wakeAgent"] is True
+        assert payload["mode"] == "wake"
+        assert payload["item_id"] == "plan:T1"
 
 
 def _last_json_line(output: str) -> dict:

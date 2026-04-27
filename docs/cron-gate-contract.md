@@ -69,15 +69,17 @@ Hermes cron scheduler  →  runs script  →  last non-empty stdout line is JSON
 
 ## Blocker vs. Script-Bug Behavior
 
-| Condition | mode | Agent runs? | Delivery suppressed? | Operator action |
-|---|---|---|---|---|
-| No eligible work | `skip` | No | Yes | None — expected idle |
-| State invalid | `blocker` | No | No (delivery sent) | Must resolve state |
-| Lock held, not stale | `blocker` | No | No | Wait for lock holder |
-| HITL poll required but failed | `blocker` | No | No | Must resolve poll |
-| Dirty git with uncommitted changes | `blocker` | No | No | Must commit or stash |
-| Script internal error | `error` | No | No | File a bug report |
-| Work available | `wake` | Yes | No | None — expected |
+| Condition | mode | Exit | Agent runs? | Delivery suppressed? | Operator action |
+|---|---|---|---|---|---|
+| No eligible work | `skip` | Exit 0 | No | Yes | None — expected idle |
+| State invalid | `blocker` | Exit 1 | No | No (delivery sent) | Must resolve state |
+| Lock held, not stale | `blocker` | Exit 1 | No | No | Wait for lock holder |
+| HITL poll required but failed | `blocker` | Exit 1 | No | No | Must resolve poll |
+| Dirty git with uncommitted changes | `blocker` | Exit 1 | No | No | Must commit or stash |
+| Script internal error | `error` | Exit 1 | No | No | File a bug report |
+| Work available | `wake` | Exit 0 | Yes | No | None — expected |
+
+> **Note:** `blocker` and `error` modes exit non-zero (Exit 1) to trigger Hermes notification. The JSON payload is still printed to stdout so the last-line JSON rule is preserved. Non-zero exit without valid JSON in stdout would be treated as a script bug.
 
 A `blocker` is a business condition that requires operator action before the worker can proceed.
 An `error` is a script bug that requires a fix before the worker can proceed.

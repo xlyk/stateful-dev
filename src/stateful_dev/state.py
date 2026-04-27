@@ -151,6 +151,26 @@ def validate_state(data: dict[str, Any]) -> ValidationResult:
         errors.append("counts must be an object")
         configured_counts = {}
 
+    # HITL block is optional; validate shape when present
+    hitl = data.get("hitl")
+    if hitl is not None:
+        if not isinstance(hitl, dict):
+            errors.append("hitl must be an object when present")
+        else:
+            if hitl.get("enabled") is True:
+                for field in ("provider", "node_id", "worker_id", "poll_policy"):
+                    if not hitl.get(field):
+                        errors.append(f"hitl.enabled=true requires hitl.{field}")
+                poll_policy = hitl.get("poll_policy")
+                if poll_policy not in ("required", "optional"):
+                    errors.append(
+                        "hitl.poll_policy must be 'required' or 'optional', "
+                        f"got: {poll_policy!r}"
+                    )
+            active_requests = hitl.get("active_requests")
+            if active_requests is not None and not isinstance(active_requests, list):
+                errors.append("hitl.active_requests must be a list when present")
+
     for status, expected in counts.items():
         found = configured_counts.get(status, 0)
         if not _is_int(found):
