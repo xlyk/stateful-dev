@@ -197,6 +197,109 @@ def transition(
 
 
 @app.command()
+def claim(
+    state: Annotated[Path, typer.Option("--state", exists=True, readable=True)],
+    run_id: Annotated[str, typer.Option("--run-id")],
+) -> None:
+    """Atomically select and claim one eligible item or return an existing active item.
+
+    Validates state first; exits non-zero if invalid.
+    Respects fresh locks; exits non-zero if a non-stale lock is held.
+    Returns an active item (in_progress/red_verified/green_verified) as-is.
+    If no active item, atomically claims the first eligible item
+    (failed_retryable then pending), increments its attempts, and records run_id.
+    Emits compact JSON with claimed flag, item, and run_id.
+    """
+    from stateful_dev.locking import FreshLockError, LockError
+    from stateful_dev.state import validate_state
+    from stateful_dev.status import ACTIVE_STATUSES, ELIGIBLE_STATUSES
+
+    data = _load_json(state)
+    validation = validate_state(data)
+    if not validation.ok:
+        for err in validation.errors:
+            typer.echo(f"state error: {err}")
+        raise typer.Exit(1)
+
+    lock = None
+    try:
+        lock = acquire_lock(state.parent, _lock_run_id("claim"), timeout_minutes=60)
+
+        items = data.get("items", [])
+        active = next(
+            (
+                item
+                for item in items
+                if isinstance(item, dict) and item.get("status") in ACTIVE_STATUSES
+            ),
+            None,
+        )
+        if active is not None:
+            payload = {
+                "claimed": True,
+                "item": {
+                    "id": active.get("id"),
+                    "title": active.get("title"),
+                    "status": active.get("status"),
+                    "attempts": active.get("attempts", 0),
+                },
+                "run_id": run_id,
+            }
+            typer.echo(to_json(payload), nl=False)
+            return
+
+        eligible_candidates = [
+            item for item in items
+            if isinstance(item, dict) and item.get("status") in ELIGIBLE_STATUSES
+        ]
+        if not eligible_candidates:
+            payload = {
+                "claimed": False,
+                "item": None,
+                "run_id": run_id,
+            }
+            typer.echo(to_json(payload), nl=False)
+            return
+
+        # Select in priority order: failed_retryable first, then pending
+        def _priority(item: dict) -> int:
+            return 0 if item.get("status") == "failed_retryable" else 1
+
+        chosen = min(eligible_candidates, key=_priority)
+        chosen["status"] = "in_progress"
+        chosen["attempts"] = chosen.get("attempts", 0) + 1
+
+        # Recompute counts
+        counts = {s: 0 for s in VALID_STATUSES}
+        for item in data.get("items", []):
+            s = item.get("status")
+            if s in counts:
+                counts[s] += 1
+        data["counts"] = counts
+        data["updated_at"] = datetime.now(UTC).isoformat()
+
+        _write_json(state, data)
+
+        payload = {
+            "claimed": True,
+            "item": {
+                "id": chosen.get("id"),
+                "title": chosen.get("title"),
+                "status": chosen.get("status"),
+                "attempts": chosen.get("attempts", 0),
+            },
+            "run_id": run_id,
+        }
+        typer.echo(to_json(payload), nl=False)
+
+    except (FreshLockError, LockError) as error:
+        _exit_lock_error(error)
+    finally:
+        if lock is not None:
+            release_lock(lock)
+
+
+@app.command()
 def report(
     state: Annotated[Path, typer.Option("--state", exists=True, readable=True)],
     summary: Annotated[Path, typer.Option("--summary", exists=True, readable=True)],
