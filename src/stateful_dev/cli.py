@@ -854,3 +854,132 @@ def lock_recover_cmd(
 
 
 app.add_typer(lock_app, name="lock")
+
+
+# ---------------------------------------------------------------------------
+# run lifecycle subcommands: start, finish, fail
+# ---------------------------------------------------------------------------
+
+RUNS_DIR_NAME = "runs"
+
+
+def _runs_dir(state_path: Path) -> Path:
+    return state_path.parent / RUNS_DIR_NAME
+
+
+def _run_file(state_path: Path, run_id: str) -> Path:
+    return _runs_dir(state_path) / f"{run_id}.json"
+
+
+run_app = typer.Typer(help="Run lifecycle commands: start, finish, fail.")
+
+
+@run_app.command("start")
+def run_start(
+    state: Annotated[Path, typer.Option("--state", exists=True, readable=True)],
+    run_id: Annotated[str, typer.Option("--run-id")],
+    item_id: Annotated[str, typer.Option("--item-id")],
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Start a named run for an item.
+
+    Creates or updates .agent-state/<job>/runs/<run-id>.json with started_at,
+    item_id, status=in_progress, and finished_at=null.
+    Idempotent: if the run already exists, it is left unchanged.
+    """
+    runs_dir = _runs_dir(state)
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    run_path = _run_file(state, run_id)
+
+    created = not run_path.exists()
+    if created:
+        run_data: dict[str, Any] = {
+            "run_id": run_id,
+            "item_id": item_id,
+            "started_at": datetime.now(UTC).isoformat(),
+            "finished_at": None,
+            "status": "in_progress",
+            "reason": None,
+        }
+        _write_json(run_path, run_data)
+
+    payload = {
+        "ok": True,
+        "created": created,
+        "run_id": run_id,
+        "item_id": item_id,
+        "run_path": str(run_path),
+    }
+    if as_json:
+        typer.echo(to_json(payload), nl=False)
+    else:
+        typer.echo(f"run started: {run_id} for {item_id}")
+
+
+@run_app.command("finish")
+def run_finish(
+    state: Annotated[Path, typer.Option("--state", exists=True, readable=True)],
+    run_id: Annotated[str, typer.Option("--run-id")],
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Mark a run as successfully finished.
+
+    Updates .agent-state/<job>/runs/<run-id>.json with finished_at and
+    status=success. Returns ok=false if the run does not exist.
+    """
+    run_path = _run_file(state, run_id)
+    if not run_path.exists():
+        payload = {"ok": False, "error": f"run {run_id} not found"}
+        if as_json:
+            typer.echo(to_json(payload), nl=False)
+        else:
+            typer.echo(f"run not found: {run_id}")
+        raise typer.Exit(1)
+
+    run_data = json.loads(run_path.read_text(encoding="utf-8"))
+    run_data["finished_at"] = datetime.now(UTC).isoformat()
+    run_data["status"] = "success"
+    _write_json(run_path, run_data)
+
+    payload = {"ok": True, "run_id": run_id, "status": "success"}
+    if as_json:
+        typer.echo(to_json(payload), nl=False)
+    else:
+        typer.echo(f"run finished: {run_id}")
+
+
+@run_app.command("fail")
+def run_fail(
+    state: Annotated[Path, typer.Option("--state", exists=True, readable=True)],
+    run_id: Annotated[str, typer.Option("--run-id")],
+    reason: Annotated[str, typer.Option("--reason")],
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Mark a run as failed with a reason.
+
+    Updates .agent-state/<job>/runs/<run-id>.json with finished_at,
+    status=failure, and reason. Returns ok=false if the run does not exist.
+    """
+    run_path = _run_file(state, run_id)
+    if not run_path.exists():
+        payload = {"ok": False, "error": f"run {run_id} not found"}
+        if as_json:
+            typer.echo(to_json(payload), nl=False)
+        else:
+            typer.echo(f"run not found: {run_id}")
+        raise typer.Exit(1)
+
+    run_data = json.loads(run_path.read_text(encoding="utf-8"))
+    run_data["finished_at"] = datetime.now(UTC).isoformat()
+    run_data["status"] = "failure"
+    run_data["reason"] = reason
+    _write_json(run_path, run_data)
+
+    payload = {"ok": True, "run_id": run_id, "status": "failure", "reason": reason}
+    if as_json:
+        typer.echo(to_json(payload), nl=False)
+    else:
+        typer.echo(f"run failed: {run_id} — {reason}")
+
+
+app.add_typer(run_app, name="run")
