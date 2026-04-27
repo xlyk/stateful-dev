@@ -95,6 +95,35 @@ def test_docs_and_fixtures_do_not_reference_legacy_cron_skill() -> None:
     assert offenders == []
 
 
+def test_cron_gate_runbook_exists_and_has_required_sections() -> None:
+    """The cron-gate runbook must exist and cover all required operational topics."""
+    runbook_path = ROOT / "docs" / "cron-gate.md"
+    missing_msg = (
+        "runbook not found. Create docs/cron-gate.md covering: "
+        "architecture, wrapper examples, cron job config, "
+        "wake/skip contract, failure modes, smoke tests, migration."
+    )
+    assert runbook_path.exists(), f"runbook not found at {runbook_path}. {missing_msg}"
+    content = runbook_path.read_text()
+
+    required_sections = [
+        ("architecture", ["architecture"]),
+        ("wrapper examples", ["wrapper", "script"]),
+        ("cron job config", ["cron", "hermes"]),
+        ("wake/skip contract", ["wakeagent", "wake", "skip"]),
+        ("failure modes", ["failure", "blocker", "error"]),
+        ("local smoke tests", ["smoke", "test"]),
+        ("migration steps", ["migration", "migrate"]),
+    ]
+
+    missing = []
+    for label, keywords in required_sections:
+        if not any(kw.lower() in content.lower() for kw in keywords):
+            missing.append(label)
+
+    assert missing == [], f"runbook missing required sections: {missing}"
+
+
 def test_usage_docs_include_install_and_smoke_commands() -> None:
     usage = (ROOT / "docs" / "usage.md").read_text()
     readme = (ROOT / "README.md").read_text()
