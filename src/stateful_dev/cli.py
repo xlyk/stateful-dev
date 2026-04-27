@@ -16,7 +16,7 @@ from stateful_dev.locking import (
     write_json_atomic,
 )
 from stateful_dev.output import to_json
-from stateful_dev.plan_parser import parse_plan_tasks
+from stateful_dev.plan_parser import PlanLintResult, lint_plan, parse_plan_tasks
 from stateful_dev.reports import render_batch_report, render_operator_handoff
 from stateful_dev.state import VALID_STATUSES, validate_state
 from stateful_dev.status import build_status, render_status
@@ -1314,3 +1314,187 @@ def run_fail(
 
 
 app.add_typer(run_app, name="run")
+
+# Plan sub-commands: plan lint, plan parse
+plan_app = typer.Typer(help="Plan lint and parse commands.")
+
+
+@plan_app.command("lint")
+def plan_lint(
+    plan: Annotated[Path, typer.Option("--plan", exists=True, readable=True)],
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Lint a plan file for structural issues.
+
+    Checks for missing task headings and duplicate generated item IDs.
+    """
+    result: PlanLintResult = lint_plan(plan)
+    payload = {
+        "ok": result.ok,
+        "errors": result.errors,
+        "warnings": result.warnings,
+        "task_count": result.task_count,
+    }
+    if as_json:
+        typer.echo(to_json(payload), nl=False)
+    else:
+        if result.ok:
+            typer.echo(f"plan is valid — {result.task_count} task(s) found")
+        else:
+            for err in result.errors:
+                typer.echo(f"ERROR: {err}", err=True)
+            raise typer.Exit(1)
+    if not result.ok:
+        raise typer.Exit(1)
+
+
+@plan_app.command("parse")
+def plan_parse(
+    plan: Annotated[Path, typer.Option("--plan", exists=True, readable=True)],
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Parse a plan file and emit structured JSON of its tasks.
+
+    Each task includes number, title, heading, body, and stable item_id.
+    """
+    tasks = parse_plan_tasks(plan)
+    payload = {
+        "plan_path": str(plan),
+        "task_count": len(tasks),
+        "tasks": [
+            {
+                "number": task.number,
+                "title": task.title,
+                "heading": task.heading,
+                "item_id": task.item_id,
+                "body": task.body,
+            }
+            for task in tasks
+        ],
+    }
+    if as_json:
+        typer.echo(to_json(payload), nl=False)
+    else:
+        typer.echo(f"parsed {len(tasks)} task(s) from {plan}")
+
+
+app.add_typer(plan_app, name="plan")
+
+# State sync-plans: reconcile plan tasks with state items
+state_app = typer.Typer(help="State reconciliation commands.")
+
+
+@state_app.command("sync-plans")
+def state_sync_plans(
+    state: Annotated[Path, typer.Option("--state", exists=True, readable=True)],
+    plan: Annotated[Path, typer.Option("--plan", exists=True, readable=True)],
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Reconcile plan tasks with state items.
+
+    Adds missing items from plan to state (based on stable item_id).
+    Detects duplicate generated IDs, disappeared plan items, and plan/state drift.
+    Does NOT mutate existing item statuses or remove items.
+    """
+    lock = None
+    try:
+        lock = acquire_lock(
+            state.parent, _lock_run_id("sync-plans"), timeout_minutes=60
+        )
+        data = _load_json(state)
+        plan_result = lint_plan(plan)
+        tasks = parse_plan_tasks(plan)
+
+        # Build set of existing item IDs in state
+        existing_ids = {item.get("id") for item in data.get("items", [])}
+        existing_ids.discard(None)
+
+        # Detect duplicate item IDs in plan itself (already in lint result)
+        plan_lint_errors = plan_result.errors[:]
+
+        # Determine which tasks are missing from state
+        added = 0
+        errors: list[str] = []
+        warnings: list[str] = []
+
+        for task in tasks:
+            if task.item_id not in existing_ids:
+                new_item = {
+                    "id": task.item_id,
+                    "plan_path": str(task.plan_path),
+                    "title": task.title,
+                    "status": "pending",
+                    "attempts": 0,
+                    "max_attempts": 3,
+                    "red_verified": False,
+                    "green_verified": False,
+                    "full_suite_verified": False,
+                    "files_touched": [],
+                    "test_commands": [],
+                    "commit_sha": None,
+                    "needs_operator": False,
+                    "result": None,
+                }
+                data["items"].append(new_item)
+                added += 1
+
+        # Report plan lint errors as sync errors
+        errors.extend(plan_lint_errors)
+
+        # Check for disappeared items (in state but not in plan)
+        plan_ids = {task.item_id for task in tasks}
+        for item in data.get("items", []):
+            if item.get("id") not in plan_ids and item.get("id") not in ("", None):
+                warnings.append(
+                    f"item '{item['id']}' is in state but not in plan — "
+                    "consider removing or marking it"
+                )
+
+        # Recompute counts
+        counts = {s: 0 for s in VALID_STATUSES}
+        for item in data.get("items", []):
+            s = item.get("status")
+            if s in counts:
+                counts[s] += 1
+        data["counts"] = counts
+        data["updated_at"] = datetime.now(UTC).isoformat()
+
+        # Ensure plan path is tracked
+        plan_str = str(plan)
+        if plan_str not in data.get("plan_paths", []):
+            data.setdefault("plan_paths", []).append(plan_str)
+
+        _write_json(state, data)
+
+        payload = {
+            "ok": not errors,
+            "errors": errors,
+            "warnings": warnings,
+            "added": added,
+            "total_items": len(data["items"]),
+            "items": data["items"],
+            "counts": counts,
+        }
+    finally:
+        if lock is not None:
+            release_lock(lock)
+
+    if as_json:
+        typer.echo(to_json(payload), nl=False)
+    else:
+        if added == 0 and not payload["errors"]:
+            msg = (
+                f"state already in sync — {len(tasks)} task(s) in plan, "
+                f"{len(data['items'])} in state"
+            )
+            typer.echo(msg)
+        elif payload["errors"]:
+            for err in payload["errors"]:
+                typer.echo(f"ERROR: {err}", err=True)
+        else:
+            typer.echo(f"added {added} item(s) from plan to state")
+    if payload["errors"]:
+        raise typer.Exit(1)
+
+
+app.add_typer(state_app, name="state")

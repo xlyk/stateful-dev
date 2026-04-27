@@ -66,3 +66,46 @@ def parse_plan_tasks(path: Path) -> list[PlanTask]:
         tasks.append(_task_from_current(path, current, body_lines))
 
     return tasks
+
+
+@dataclass(frozen=True)
+class PlanLintResult:
+    ok: bool
+    errors: list[str]
+    warnings: list[str]
+    task_count: int
+
+
+def lint_plan(path: Path) -> PlanLintResult:
+    """Lint a plan file and return issues found.
+
+    Checks:
+    - Missing task headings (plan with no ## Task N: ... lines)
+    - Duplicate generated item IDs
+    """
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    tasks = parse_plan_tasks(path)
+
+    if not tasks:
+        errors.append("plan has no task headings (## Task N: ...)")
+
+    # Check for duplicate generated item IDs
+    seen_ids: dict[str, int] = {}
+    for task in tasks:
+        prev = seen_ids.get(task.item_id)
+        if prev is not None:
+            errors.append(
+                f"duplicate generated item ID '{task.item_id}' at tasks "
+                f"{prev + 1} and {task.number}"
+            )
+        else:
+            seen_ids[task.item_id] = task.number - 1
+
+    return PlanLintResult(
+        ok=not errors,
+        errors=errors,
+        warnings=warnings,
+        task_count=len(tasks),
+    )
