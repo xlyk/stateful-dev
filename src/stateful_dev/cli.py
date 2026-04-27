@@ -256,6 +256,183 @@ def transition(
     typer.echo(to_json(payload), nl=False)
 
 
+@app.command()
+def record(
+    ctx: typer.Context,
+) -> None:
+    """Record evidence for a gate (red, green, full-suite, lint).
+
+    Use the subcommands to record evidence for specific gates:
+    - record red: focused RED test evidence
+    - record green: focused GREEN test evidence
+    - record full-suite: full test suite evidence
+    - record lint: lint check evidence
+
+    The evidence is appended to the item's evidence list and used
+    in legal transition enforcement.
+    """
+    typer.echo(
+        "Use: record red | record green | record full-suite | record lint",
+        err=True,
+    )
+    raise typer.Exit(1)
+
+
+@app.command()
+def record_red(
+    state: Annotated[Path, typer.Option("--state", exists=True, readable=True)],
+    item_id: Annotated[str, typer.Option("--item-id")],
+    command: Annotated[str, typer.Option("--command")],
+    result: Annotated[str, typer.Option("--result")],
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Record focused RED test evidence for an item.
+
+    Requires the item to be in 'in_progress' status.
+    The evidence is stored in the item's evidence list and used
+    when transitioning to red_verified.
+    """
+    evidence = {
+        "focused_red_command": command,
+        "focused_red_result": result,
+    }
+    _record_evidence(state, item_id, "red_verified", evidence, as_json)
+
+
+@app.command()
+def record_green(
+    state: Annotated[Path, typer.Option("--state", exists=True, readable=True)],
+    item_id: Annotated[str, typer.Option("--item-id")],
+    command: Annotated[str, typer.Option("--command")],
+    result: Annotated[str, typer.Option("--result")],
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Record focused GREEN test evidence for an item.
+
+    Requires the item to have RED evidence already recorded.
+    The evidence is stored in the item's evidence list and used
+    when transitioning to green_verified.
+    """
+    evidence = {
+        "focused_green_command": command,
+        "focused_green_result": result,
+    }
+    _record_evidence(state, item_id, "red_verified", evidence, as_json)
+
+
+@app.command()
+def record_full_suite(
+    state: Annotated[Path, typer.Option("--state", exists=True, readable=True)],
+    item_id: Annotated[str, typer.Option("--item-id")],
+    command: Annotated[str, typer.Option("--command")],
+    result: Annotated[str, typer.Option("--result")],
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Record full test suite evidence for an item.
+
+    Typically recorded after green_verified, used when transitioning to succeeded.
+    """
+    evidence = {
+        "full_suite_command": command,
+        "full_suite_result": result,
+    }
+    _record_evidence(state, item_id, "green_verified", evidence, as_json)
+
+
+@app.command()
+def record_lint(
+    state: Annotated[Path, typer.Option("--state", exists=True, readable=True)],
+    item_id: Annotated[str, typer.Option("--item-id")],
+    command: Annotated[str, typer.Option("--command")],
+    result: Annotated[str, typer.Option("--result")],
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Record lint check evidence for an item.
+
+    Lint evidence is stored alongside other evidence for completeness.
+    """
+    evidence = {
+        "lint_command": command,
+        "lint_result": result,
+    }
+    _record_evidence(state, item_id, "green_verified", evidence, as_json)
+
+
+def _record_evidence(
+    state: Path,
+    item_id: str,
+    min_status_for_gate: str,
+    evidence: dict[str, Any],
+    as_json: bool,
+) -> None:
+    """Append evidence to an item, validating it meets minimum gate requirements.
+
+    Args:
+        state: path to the state file
+        item_id: id of the item to record evidence for
+        min_status_for_gate: minimum status the item must have reached
+            before this gate evidence is meaningful (e.g. 'red_verified' for green gate)
+        evidence: evidence dict with command and result fields
+        as_json: whether to emit JSON output
+    """
+    from stateful_dev.transitions import _has_red_evidence
+
+    lock = None
+    try:
+        lock = acquire_lock(
+            state.parent, _lock_run_id("record"), timeout_minutes=60
+        )
+        data = _load_json(state)
+        item = None
+        for it in data.get("items", []):
+            if it.get("id") == item_id:
+                item = it
+                break
+        if item is None:
+            typer.echo(f"item not found: {item_id}", err=True)
+            raise typer.Exit(1)
+
+        # Basic sanity checks on the evidence
+        if "command" in evidence and not evidence["command"]:
+            typer.echo("command must not be empty", err=True)
+            raise typer.Exit(1)
+        if "result" in evidence and not evidence["result"]:
+            typer.echo("result must not be empty", err=True)
+            raise typer.Exit(1)
+
+        # Gate-specific requirements
+        if "focused_green_command" in evidence or "full_suite_command" in evidence:
+            if not _has_red_evidence(item):
+                typer.echo(
+                    "RED evidence must be recorded before GREEN or full-suite evidence",
+                    err=True,
+                )
+                raise typer.Exit(1)
+
+        # Append evidence
+        item.setdefault("evidence", []).append(evidence)
+        data["updated_at"] = datetime.now(UTC).isoformat()
+        _write_json(state, data)
+
+        payload = {
+            "item_id": item_id,
+            "evidence_keys": list(evidence.keys()),
+            "total_evidence_entries": len(item.get("evidence", [])),
+        }
+        if as_json:
+            typer.echo(to_json(payload), nl=False)
+        else:
+            typer.echo(
+                f"recorded {list(evidence.keys())} evidence for {item_id} "
+                f"({len(item.get('evidence', []))} total entries)"
+            )
+    except (FreshLockError, LockError) as error:
+        _exit_lock_error(error)
+    finally:
+        if lock is not None:
+            release_lock(lock)
+
+
 _APP_LOCK_TIMEOUT = 60
 
 
