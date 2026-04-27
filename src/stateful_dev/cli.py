@@ -17,7 +17,7 @@ from stateful_dev.locking import (
 )
 from stateful_dev.output import to_json
 from stateful_dev.plan_parser import parse_plan_tasks
-from stateful_dev.reports import render_batch_report
+from stateful_dev.reports import render_batch_report, render_operator_handoff
 from stateful_dev.state import VALID_STATUSES, validate_state
 from stateful_dev.status import build_status, render_status
 from stateful_dev.transitions import transition_item
@@ -926,6 +926,64 @@ def complete(
             for err in validation.errors[:3]:
                 lines.append(f"doctor_error: {err}")
         typer.echo("\n".join(lines))
+
+
+@app.command()
+def handoff(
+    question: Annotated[str, typer.Option("--question")],
+    why: Annotated[str, typer.Option("--why")],
+    recommended_answer: Annotated[str, typer.Option("--recommended-answer")],
+    allowed_next_action: Annotated[str, typer.Option("--allowed-next-action")],
+    job_name: Annotated[str, typer.Option("--job-name")],
+    project_root: Annotated[Path, typer.Option("--project-root")],
+    plan_path: Annotated[str, typer.Option("--plan-path")],
+    state_path: Annotated[str, typer.Option("--state-path")],
+    item_id: Annotated[str, typer.Option("--item-id")],
+    title: Annotated[str, typer.Option("--title")],
+    status: Annotated[str, typer.Option("--status")],
+    evidence: Annotated[list[str] | None, typer.Option("--evidence")] = None,
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Render an operator handoff document for a blocked item.
+
+    Exposes render_operator_handoff with question, why, recommended answer,
+    allowed next action, and item context. Outputs plain text and JSON.
+    """
+    if evidence is None:
+        evidence = []
+    plain = render_operator_handoff(
+        job_name=job_name,
+        question=question,
+        why=why,
+        recommended_answer=recommended_answer,
+        project_root=str(project_root),
+        plan_path=plan_path,
+        state_path=state_path,
+        item_id=item_id,
+        title=title,
+        status=status,
+        evidence=evidence,
+        allowed_next_action=allowed_next_action,
+    )
+    if as_json:
+        payload = {
+            "job_name": job_name,
+            "question": question,
+            "why": why,
+            "recommended_answer": recommended_answer,
+            "allowed_next_action": allowed_next_action,
+            "project_root": str(project_root),
+            "plan_path": plan_path,
+            "state_path": state_path,
+            "item_id": item_id,
+            "title": title,
+            "status": status,
+            "evidence": evidence,
+            "plain": plain,
+        }
+        typer.echo(to_json(payload), nl=False)
+    else:
+        typer.echo(plain, nl=False)
 
 
 hitl_app = typer.Typer(help="Poseidon HITL polling commands.")
