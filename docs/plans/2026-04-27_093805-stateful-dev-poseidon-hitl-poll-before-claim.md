@@ -14,6 +14,74 @@
 
 ---
 
+
+## Simplified MVP path
+
+The full design below is valid for hardened multi-worker production use, but it is more than we need for the next useful dogfood step.
+
+Use this MVP first:
+
+### MVP Task 1: Add a cron preflight script that polls Poseidon before Hermes wakes the agent
+
+**Objective:** Put the guarantee in Hermes cron's deterministic `script` hook, which already runs before the LLM prompt is built.
+
+**Files:**
+- Create: `scripts/stateful_dev_poseidon_preflight.py` or equivalent helper under `stateful-dev`
+- Test: `tests/test_poseidon_preflight.py`
+
+**Behavior:**
+1. Load a small per-worker config: state path, worker ID, node ID, Poseidon base URL, token file.
+2. Run `stateful-dev doctor/status` or equivalent library checks.
+3. Poll Poseidon for this worker's active request IDs.
+4. If a matching HITL event exists, write a local inbox JSON file and print compact JSON context for Hermes.
+5. If no HITL event and no eligible work exists, print `{"wakeAgent": false}` as the last non-empty line.
+6. If normal work exists, print the exact state/item context for Hermes.
+
+**Acceptance:** The script is tested with fake Poseidon responses and proves poll happens before any agent prompt can run.
+
+### MVP Task 2: Add one minimal stateful-dev claim/next command
+
+**Objective:** Remove the brittle prompt-driven sequence of `status -> pick item -> transition in_progress`.
+
+**Files:**
+- Create: `src/stateful_dev/claiming.py`
+- Modify: `src/stateful_dev/cli.py`
+- Test: `tests/test_claiming.py`
+
+**Behavior:**
+- Validate state.
+- Respect the lock.
+- Return active item if one exists, otherwise claim one pending/failed_retryable item.
+- Increment attempts and write atomically.
+- Return compact JSON for the cron preflight script.
+
+**Acceptance:** The preflight script can call this command only after Poseidon polling finishes.
+
+### MVP Task 3: Dogfood one real worker with the preflight script
+
+**Objective:** Prove actual ordering with the least new machinery.
+
+**Acceptance:** Evidence shows:
+- cron script ran first;
+- Poseidon poll happened before Hermes prompt construction;
+- matching HITL event was routed to the correct worker/item;
+- no-work runs return `{"wakeAgent": false}`;
+- normal work runs wake Hermes with exactly one item context.
+
+### Deferred hardening
+
+Defer these until MVP pain proves they are needed:
+- full HITL state schema validation;
+- run-start/run-finish lifecycle commands;
+- deployment profile/prompt rendering;
+- guarded server-side consume enforcement;
+- two-worker same-node isolation tests;
+- local dispatcher/inbox protocol beyond simple staged JSON.
+
+Keep one invariant now: the cron preflight script must poll Poseidon before it returns any context that can wake the LLM.
+
+---
+
 ## Design invariants
 
 1. Prompt text is not the guarantee. `stateful-dev` must enforce the poll-before-claim invariant in code.
