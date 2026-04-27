@@ -441,9 +441,90 @@ class TestWrapperScriptOutput:
         assert payload.get("complete") is True
 
 
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Test: Thin worker prompt (no fat embedded prompt in cron job)
+# -----------------------------------------------------------------------------
+
+class TestCronJobHasThinExecutorPrompt:
+    """
+    The Hermes cron job must use a thin executor prompt — no fat embedded
+    prompt that duplicates skill instructions.  The skill field (or skills
+    list) must reference stateful-dev-lean-worker, and the prompt field
+    must be absent or empty.
+    """
+
+    def test_cron_job_has_no_fat_embedded_prompt(self) -> None:
+        """
+        RED: The cron job config should not contain a fat embedded prompt.
+        A fat prompt is one containing TDD policy, startup sequence steps,
+        or plan/scope sections that duplicate the lean-worker skill.
+
+        This test fails when the prompt field is long (> 500 chars) and
+        contains keywords that indicate duplicated skill content.
+        """
+        cron_jobs_path = Path.home() / ".hermes" / "cron" / "jobs.json"
+        if not cron_jobs_path.exists():
+            pytest.skip("~/.hermes/cron/jobs.json not found")
+
+        import json
+        with open(cron_jobs_path, encoding="utf-8") as fh:
+            data = json.load(fh)
+
+        jobs = data.get("jobs", [])
+        target = next(
+            (j for j in jobs if j.get("name") == "stateful-dev-cron-gate-worker"),
+            None,
+        )
+        if target is None:
+            pytest.skip("stateful-dev-cron-gate-worker cron job not found")
+
+        prompt = target.get("prompt") or ""
+
+        # Indicators of a fat embedded prompt that duplicates skill content
+        fat_indicators = [
+            "TDD policy",
+            "Required startup sequence",
+            "RE D/GREEN",
+            "full-suite/lint",
+            "stateful-dev transition",
+            "stateful-dev doctor",
+            "blocker report",
+            "conventional commit",
+            "Do not push",
+            "Dirty git",
+            "RED/GREEN/REFACTOR",
+            "fresh lock",
+            "hand-edit",
+        ]
+
+        found_indicators = [kw for kw in fat_indicators if kw in prompt]
+
+        # The prompt must either be absent/empty OR reference the lean-worker skill
+        # A short prompt that delegates to the skill is acceptable
+        has_skill_reference = (
+            target.get("skill") == "stateful-dev-lean-worker"
+            or "stateful-dev-lean-worker" in target.get("skills", [])
+        )
+        prompt_is_empty = len(prompt.strip()) == 0
+        prompt_is_short_delegation = (
+            len(prompt) < 200
+            and "lean-worker" in prompt.lower()
+        )
+
+        assert (
+            prompt_is_empty
+            or prompt_is_short_delegation
+            or (has_skill_reference and len(prompt) < 500 and not found_indicators)
+        ), (
+            f"Cron job still has a fat embedded prompt ({len(prompt)} chars) "
+            f"with indicators: {found_indicators}. "
+            f"Use skill='stateful-dev-lean-worker' with a thin delegation prompt."
+        )
+
+
+# -----------------------------------------------------------------------------
 # Local integration tests (opt-in only)
-# ---------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
 
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line(
