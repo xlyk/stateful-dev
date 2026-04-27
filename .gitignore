@@ -1,4 +1,5 @@
 .agent-state/
+.hermes/learnings.jsonl
 .venv/
 __pycache__/
 .pytest_cache/
