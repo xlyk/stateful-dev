@@ -2,7 +2,7 @@
 
 This milestone addresses the completion-audit gaps found after the initial `stateful-dev` worker completed its planned milestones.
 
-Worker profile: use `stateful-cron-development`, strict TDD, one item per run, commits allowed after gates, pushes disabled unless the operator explicitly approves.
+Worker profile: use `stateful-dev-cron`, strict TDD, one item per run, commits allowed after gates, pushes disabled unless the operator explicitly approves. Use `stateful-dev-helper` for state mutation and validation.
 
 ## Task 1: Harden CLI state writes with locking and atomic replace
 

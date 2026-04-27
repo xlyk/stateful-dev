@@ -1,6 +1,6 @@
 # Stateful Dev Milestone 03 — Transitions, Locking, and Reports
 
-> **For Hermes:** Use the `stateful-cron-development` skill. Execute one `## Task N:` item per run with strict RED/GREEN/REFACTOR.
+> **For Hermes:** Use the `stateful-dev-cron` skill. Execute one `## Task N:` item per run with strict RED/GREEN/REFACTOR, and use `stateful-dev-helper` for state mutation and validation.
 
 **Goal:** Enforce legal state transitions, add atomic lock handling, record evidence, and render compact reports.
 

@@ -12,7 +12,7 @@
 
 ---
 
-## Task 1: Replace stale stateful-cron-development references in docs and fixtures
+## Task 1: Replace stale legacy cron-skill references in docs and fixtures
 
 **Todoist:** `6gV9qj4MWgJgrMJR`
 
@@ -24,7 +24,7 @@
 - Modify: `tests/**/*.py` fixtures/assertions as needed
 
 **Required cycle:**
-1. Write or update a focused docs/fixture test that fails on stale `stateful-cron-development` references.
+1. Write or update a focused docs/fixture test that fails on stale legacy cron-skill references.
 2. Run the focused test and verify the failure is specifically the stale reference.
 3. Update docs/fixtures only.
 4. Run the focused test, full suite, `uv run ruff check .`, and commit with `docs:` or `test:` conventional commit.

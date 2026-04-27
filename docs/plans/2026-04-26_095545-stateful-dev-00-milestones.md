@@ -1,6 +1,6 @@
 # Stateful Dev Implementation Plan Index
 
-> **For Hermes:** Use the `stateful-cron-development` skill to execute these milestone plans task-by-task with strict RED/GREEN/REFACTOR.
+> **For Hermes:** Use the `stateful-dev-cron` skill to execute these milestone plans task-by-task with strict RED/GREEN/REFACTOR, and use `stateful-dev-helper` for state mutation and validation.
 
 **Goal:** Build a local-first Python CLI plus Hermes plugin wrapper that makes stateful cron development workers safer and less dependent on manual JSON/state protocol handling.
 

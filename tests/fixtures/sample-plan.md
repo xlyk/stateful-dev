@@ -1,6 +1,6 @@
 # Sample Milestone
 
-> Use the `stateful-cron-development` skill for this disposable fixture.
+> Use the `stateful-dev-cron` skill for this disposable fixture, and use `stateful-dev-helper` for state mutation and validation.
 
 ## Task 1: Prove disposable flow
 

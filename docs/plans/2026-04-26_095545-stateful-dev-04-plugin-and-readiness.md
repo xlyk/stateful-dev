@@ -1,6 +1,6 @@
 # Stateful Dev Milestone 04 — Hermes Plugin and Readiness
 
-> **For Hermes:** Use the `stateful-cron-development` skill. Execute one `## Task N:` item per run with strict RED/GREEN/REFACTOR.
+> **For Hermes:** Use the `stateful-dev-cron` skill. Execute one `## Task N:` item per run with strict RED/GREEN/REFACTOR, and use `stateful-dev-helper` for state mutation and validation.
 
 **Goal:** Add a local Hermes plugin wrapper after the CLI is tested, document installation, and prove the workflow with a disposable sample state.
 

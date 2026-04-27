@@ -1,6 +1,6 @@
 # Stateful Dev Milestone 01 — Foundation
 
-> **For Hermes:** Use the `stateful-cron-development` skill. Execute one `## Task N:` item per run with strict RED/GREEN/REFACTOR.
+> **For Hermes:** Use the `stateful-dev-cron` skill. Execute one `## Task N:` item per run with strict RED/GREEN/REFACTOR, and use `stateful-dev-helper` for state mutation and validation.
 
 **Goal:** Bootstrap a tested Python CLI package without implementing stateful behavior yet.
 
