@@ -832,6 +832,102 @@ def report(
     typer.echo(render_batch_report(_load_json(state), _load_json(summary)), nl=False)
 
 
+@app.command()
+def complete(
+    state: Annotated[Path, typer.Option("--state", exists=True, readable=True)],
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Audit a worker for safe shutdown.
+
+    Verifies: no active/retryable work remains, doctor passes, lock is clear.
+    Emits shutdown-approval decision with counts and recommended next action.
+
+    Exit code 0 regardless of outcome; caller must inspect the payload to decide.
+    """
+    from datetime import UTC, timedelta
+
+    from stateful_dev.locking import LOCK_DIR_NAME, _read_metadata
+    from stateful_dev.state import validate_state
+
+    data = _load_json(state)
+    validation = validate_state(data)
+    doctor_ok = validation.ok
+
+    # Lock check
+    lock_path = state.parent / LOCK_DIR_NAME
+    lock_held = lock_path.exists()
+    lock_stale = False
+    if lock_held:
+        meta = _read_metadata(lock_path)
+        acquired_at = meta.get("acquired_at")
+        if isinstance(acquired_at, str):
+            try:
+                acquired = datetime.fromisoformat(acquired_at)
+                if acquired.tzinfo is None:
+                    acquired = acquired.replace(tzinfo=UTC)
+                lock_stale = (datetime.now(UTC) - acquired) >= timedelta(minutes=60)
+            except ValueError:
+                lock_stale = True
+        else:
+            lock_stale = True
+    lock_clear = not lock_held or lock_stale
+
+    # Count active and retryable items
+    counts = validation.counts
+    active_count = (
+        counts.get("in_progress", 0)
+        + counts.get("red_verified", 0)
+        + counts.get("green_verified", 0)
+    )
+    retryable_count = counts.get("failed_retryable", 0)
+    active_or_retryable_count = active_count + retryable_count
+
+    shutdown_approved = (
+        doctor_ok
+        and lock_clear
+        and active_or_retryable_count == 0
+    )
+
+    # Build next action
+    if not doctor_ok:
+        next_action = "repair invalid state before considering shutdown"
+    elif not lock_clear:
+        next_action = "recover stale lock or wait for lock holder"
+    elif active_count > 0:
+        next_action = "resume or complete active item before shutdown"
+    elif retryable_count > 0:
+        next_action = "review failed_retryable items — retry or mark failed_final"
+    else:
+        next_action = "pause worker or remove from cron schedule"
+
+    payload = {
+        "shutdown_approved": shutdown_approved,
+        "doctor_ok": doctor_ok,
+        "lock_clear": lock_clear,
+        "active_count": active_count,
+        "failed_retryable_count": retryable_count,
+        "active_or_retryable_count": active_or_retryable_count,
+        "counts": counts,
+        "next_action": next_action,
+    }
+
+    if as_json:
+        typer.echo(to_json(payload), nl=False)
+    else:
+        lines = [
+            f"shutdown_approved: {shutdown_approved}",
+            f"doctor_ok: {doctor_ok}",
+            f"lock_clear: {lock_clear}",
+            f"active_count: {active_count}",
+            f"failed_retryable_count: {retryable_count}",
+            f"next_action: {next_action}",
+        ]
+        if not doctor_ok:
+            for err in validation.errors[:3]:
+                lines.append(f"doctor_error: {err}")
+        typer.echo("\n".join(lines))
+
+
 hitl_app = typer.Typer(help="Poseidon HITL polling commands.")
 
 
