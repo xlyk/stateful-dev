@@ -10,6 +10,8 @@ from stateful_dev.locking import (
     FreshLockError,
     LockError,
     acquire_lock,
+    lock_status,
+    recover_stale_lock,
     release_lock,
     write_json_atomic,
 )
@@ -726,3 +728,71 @@ def hitl_poll_before_run(
 
 
 app.add_typer(hitl_app, name="hitl")
+
+
+# ---------------------------------------------------------------------------
+# lock subcommands: status and recover
+# ---------------------------------------------------------------------------
+
+lock_app = typer.Typer(help="Lock status and stale-lock recovery commands.")
+
+
+@lock_app.command("status")
+def lock_status_cmd(
+    state: Annotated[Path, typer.Option("--state", exists=True, readable=True)],
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Show the current lock state for a worker state file.
+
+    Reports whether the lock is held or clear, the run_id and acquired_at
+    timestamp if held, and whether the lock is classified as stale (>60 min old).
+    """
+    status = lock_status(state)
+    if as_json:
+        typer.echo(to_json(status), nl=False)
+    else:
+        if status["held"]:
+            stale_str = " (STALE)" if status["is_stale"] else ""
+            typer.echo(
+                f"lock: held by {status['run_id'] or 'unknown'} "
+                f"since {status['acquired_at'] or 'unknown'}{stale_str}"
+            )
+        else:
+            typer.echo("lock: clear")
+
+
+@lock_app.command("recover")
+def lock_recover_cmd(
+    state: Annotated[Path, typer.Option("--state", exists=True, readable=True)],
+    confirm: Annotated[bool, typer.Option("--confirm")] = False,
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Remove a stale lock after operator confirmation.
+
+    Performs backup-before-write: the lock dir is renamed to lock.bak before
+    removal so it can be restored if needed.
+
+    Refuses to recover a fresh (non-stale) lock.
+    Exits non-zero if --confirm is not provided or if the lock is fresh.
+    """
+    if not confirm:
+        typer.echo("aborted: --confirm flag is required to remove a stale lock")
+        raise typer.Exit(1)
+
+    try:
+        recovered_run_id = recover_stale_lock(state)
+        payload = {"ok": True, "recovered_run_id": recovered_run_id}
+        if as_json:
+            typer.echo(to_json(payload), nl=False)
+        else:
+            typer.echo(f"recovered stale lock: {recovered_run_id}")
+    except LockError as exc:
+        payload = {"ok": False, "error": str(exc)}
+        if as_json:
+            typer.echo(to_json(payload), nl=False)
+        else:
+            typer.echo(f"lock recover failed: {exc}", err=True)
+        raise typer.Exit(1) from exc
+
+
+app.add_typer(lock_app, name="lock")

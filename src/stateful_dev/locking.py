@@ -94,3 +94,71 @@ def release_lock(lock: StateLock) -> None:
     if metadata.get("run_id") != lock.run_id:
         raise LockError("cannot release lock owned by another run")
     shutil.rmtree(lock.path)
+
+
+# ---------------------------------------------------------------------------
+# stale lock detection used by both locking.py and status.py / cli.py
+# ---------------------------------------------------------------------------
+
+STALE_LOCK_TIMEOUT_MINUTES = 60
+
+
+def lock_status(state_path: Path) -> dict[str, Any]:
+    """Return the current lock status for a state file.
+
+    Returns a dict with keys:
+        held (bool): True if a lock directory exists
+        run_id (str | None): run_id from lock metadata, or None
+        acquired_at (str | None): ISO timestamp from lock metadata, or None
+        is_stale (bool): True if lock is held but stale (> 60 min old)
+    """
+    lock_path = state_path.parent / LOCK_DIR_NAME
+    if not lock_path.exists():
+        return {"held": False, "run_id": None, "acquired_at": None, "is_stale": False}
+    metadata = _read_metadata(lock_path)
+    acquired_at: str | None = (
+        metadata.get("acquired_at") if isinstance(metadata, dict) else None
+    )
+    is_stale = (
+        _is_stale(metadata, STALE_LOCK_TIMEOUT_MINUTES)
+        if lock_path.exists()
+        else False
+    )
+    return {
+        "held": lock_path.exists(),
+        "run_id": metadata.get("run_id") if isinstance(metadata, dict) else None,
+        "acquired_at": acquired_at,
+        "is_stale": is_stale,
+    }
+
+
+def recover_stale_lock(state_path: Path) -> str:
+    """Remove a stale lock directory after confirming it is stale.
+
+    Performs backup-before-write by renaming the lock dir to a .bak path
+    with a timestamp before removal, so recovery is possible.
+
+    Returns the run_id of the recovered lock.
+
+    Raises LockError if the lock is fresh (not stale).
+    Raises LockError if no lock exists.
+    """
+    lock_path = state_path.parent / LOCK_DIR_NAME
+    if not lock_path.exists():
+        raise LockError("no lock to recover")
+
+    metadata = _read_metadata(lock_path)
+    if not _is_stale(metadata, STALE_LOCK_TIMEOUT_MINUTES):
+        raise LockError("refusing to recover a fresh lock")
+
+    run_id = (
+        metadata.get("run_id", "unknown") if isinstance(metadata, dict) else "unknown"
+    )
+
+    # Backup before removal
+    backup_path = lock_path.parent / f"{LOCK_DIR_NAME}.bak"
+    if backup_path.exists():
+        shutil.rmtree(backup_path)
+    shutil.move(str(lock_path), str(backup_path))
+
+    return run_id
