@@ -26,6 +26,7 @@ line-length = 88
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+per-file-ignores = { "tests/*" = ["E501"] }
 
 [tool.pytest.ini_options]
 markers = [

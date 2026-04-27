@@ -1,8 +1,30 @@
 name: stateful-dev
-description: Stateful development worker utilities
-version: 0.1.0
+description: Hermes plugin exposing stable stateful-dev lifecycle commands as thin tool wrappers backed by tested library code.
+version: 0.2.0
 tools:
   - name: stateful_dev_doctor
     description: Validate a durable worker state file.
   - name: stateful_dev_report
     description: Render a compact stateful development batch report.
+  - name: stateful_dev_status
+    description: Summarize worker lifecycle status for operators and cron workers.
+  - name: stateful_dev_transition
+    description: Move one item through a legal status transition.
+  - name: stateful_dev_record_red
+    description: Record focused RED test evidence for an item.
+  - name: stateful_dev_record_green
+    description: Record focused GREEN test evidence for an item.
+  - name: stateful_dev_record_full_suite
+    description: Record full test suite evidence for an item.
+  - name: stateful_dev_record_lint
+    description: Record lint check evidence for an item.
+  - name: stateful_dev_claim
+    description: Atomically select and claim one eligible item or return an existing active item.
+  - name: stateful_dev_lock_status
+    description: Report lock status for a worker state directory.
+  - name: stateful_dev_lock_recover
+    description: Recover a stale lock or report an error on a fresh lock.
+  - name: stateful_dev_handoff
+    description: Render an operator handoff document for a blocked item.
+  - name: stateful_dev_complete
+    description: Audit a worker for safe shutdown decisions.
