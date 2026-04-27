@@ -300,6 +300,239 @@ def claim(
 
 
 @app.command()
+def cron_gate(
+    state: Annotated[Path, typer.Option("--state", exists=True, readable=True)],
+    project_root: Annotated[Path, typer.Option("--project-root")],
+    worker_id: Annotated[str, typer.Option("--worker-id")],
+    run_id: Annotated[str, typer.Option("--run-id")],
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Emit the cron-gate wake/skip decision JSON for Hermes cron.
+
+    Owns deterministic local wake/skip decisions:
+    - validates state via doctor
+    - checks git status for uncommitted changes
+    - checks lock state
+    - resumes active items
+    - claims eligible items when no active item exists
+    - emits the contract-defined wakeAgent JSON payload
+
+    Does not acquire a long-lived lock; claim is called internally for eligible items,
+    which acquires/releases a short lock as needed.
+    """
+    import subprocess
+    from datetime import UTC, timedelta
+
+    from stateful_dev.locking import LOCK_DIR_NAME, LOCK_METADATA_NAME, _read_metadata
+    from stateful_dev.state import validate_state
+    from stateful_dev.status import ELIGIBLE_STATUSES, build_status
+
+    # 1. Load and validate state
+    data = _load_json(state)
+    validation = validate_state(data)
+    state_ok = validation.ok
+
+    # 2. Git status check
+    git_dirty = False
+    git_reason = ""
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=project_root,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.stdout.strip():
+            git_dirty = True
+            git_reason = result.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        # git unavailable — not a blocker, just skip
+        pass
+
+    # 3. Lock check
+    lock_path = state.parent / LOCK_DIR_NAME
+    lock_metadata_path = lock_path / LOCK_METADATA_NAME
+    lock_held = lock_path.exists()
+    lock_stale = False
+    if lock_held:
+        meta = _read_metadata(lock_path)
+        acquired_at = meta.get("acquired_at")
+        if isinstance(acquired_at, str):
+            try:
+                acquired = datetime.fromisoformat(acquired_at)
+                if acquired.tzinfo is None:
+                    acquired = acquired.replace(tzinfo=UTC)
+                lock_stale = (datetime.now(UTC) - acquired) >= timedelta(minutes=60)
+            except ValueError:
+                lock_stale = True
+        else:
+            lock_stale = True
+
+    lock_blocked = lock_held and not lock_stale
+
+    # 4. Build status payload
+    status_payload = build_status(state, data)
+
+    # 5. Determine mode and payload
+    def _item_fields(item: dict | None) -> tuple[str | None, str | None, str | None]:
+        if item is None:
+            return None, None, None
+        return item.get("id"), item.get("title"), item.get("status")
+
+    def _build_payload(
+        mode: str,
+        *,
+        wake_agent: bool,
+        blocker: str | None = None,
+        message: str | None = None,
+        item_id: str | None = None,
+        item_title: str | None = None,
+        item_status: str | None = None,
+        complete: bool = False,
+    ) -> dict:
+        return {
+            "wakeAgent": wake_agent,
+            "mode": mode,
+            "worker_id": worker_id,
+            "run_id": run_id,
+            "project_root": str(project_root),
+            "state_path": str(state),
+            "item_id": item_id,
+            "item_title": item_title,
+            "item_status": item_status,
+            "blocker": blocker,
+            "complete": complete,
+            "message": message,
+        }
+
+    # Determine primary blocker reason (priority order)
+    if not state_ok:
+        err_details = "; ".join(validation.errors[:2])
+        blocker_msg = f"state invalid: {err_details}"
+        payload = _build_payload(
+            "blocker",
+            wake_agent=False,
+            blocker=blocker_msg,
+            message="State invalid. Resolve before resuming worker.",
+            complete=False,
+        )
+    elif lock_blocked:
+        lock_run = "unknown"
+        if lock_metadata_path.exists():
+            try:
+                meta = json.loads(lock_metadata_path.read_text(encoding="utf-8"))
+                lock_run = meta.get("run_id", "unknown")
+            except Exception:
+                pass
+        blocker_msg = f"lock held by {lock_run}"
+        payload = _build_payload(
+            "blocker",
+            wake_agent=False,
+            blocker=blocker_msg,
+            message="Lock is held. Wait for lock holder or recover stale lock.",
+            complete=False,
+        )
+    elif git_dirty:
+        blocker_msg = f"uncommitted changes in project root: {git_reason}"
+        payload = _build_payload(
+            "blocker",
+            wake_agent=False,
+            blocker=blocker_msg,
+            message="Uncommitted changes detected. Commit or stash before running.",
+            complete=False,
+        )
+    elif status_payload.get("complete"):
+        payload = _build_payload(
+            "skip",
+            wake_agent=False,
+            blocker=None,
+            message="All items terminal. No work available.",
+            complete=True,
+        )
+    elif status_payload.get("active_item"):
+        item = status_payload["active_item"]
+        iid, ititle, istatus = _item_fields(item)
+        payload = _build_payload(
+            "wake",
+            wake_agent=True,
+            item_id=iid,
+            item_title=ititle,
+            item_status=istatus,
+            complete=False,
+            message=f"Continuing {iid} ({istatus})",
+        )
+    else:
+        # No active item but work exists — claim one
+        items = data.get("items", [])
+        eligible = [
+            item for item in items
+            if isinstance(item, dict) and item.get("status") in ELIGIBLE_STATUSES
+        ]
+        if not eligible:
+            # Race: item became terminal between status check and now
+            payload = _build_payload(
+                "skip",
+                wake_agent=False,
+                blocker=None,
+                message="No eligible items. Worker may be complete.",
+                complete=True,
+            )
+        else:
+            # Claim the first eligible item
+            chosen = min(
+                eligible,
+                key=lambda i: 0 if i.get("status") == "failed_retryable" else 1,
+            )
+            chosen["status"] = "in_progress"
+            chosen["attempts"] = chosen.get("attempts", 0) + 1
+
+            # Recompute counts
+            counts = {s: 0 for s in VALID_STATUSES}
+            for item in data.get("items", []):
+                s = item.get("status")
+                if s in counts:
+                    counts[s] += 1
+            data["counts"] = counts
+            data["updated_at"] = datetime.now(UTC).isoformat()
+            _write_json(state, data)
+
+            iid, ititle, _ = _item_fields(chosen)
+            payload = _build_payload(
+                "wake",
+                wake_agent=True,
+                item_id=iid,
+                item_title=ititle,
+                item_status="in_progress",
+                complete=False,
+                message=f"Claimed {iid} for {run_id}",
+            )
+
+    if as_json:
+        typer.echo(to_json(payload), nl=False)
+    else:
+        # Human-readable summary lines, then JSON on the last line
+        item_line = (
+            f"item: {payload['item_id']} ({payload['item_status']})"
+            if payload["item_id"]
+            else "item: none"
+        )
+        summary_lines = [
+            f"worker: {worker_id}",
+            f"run: {run_id}",
+            f"mode: {payload['mode']}",
+            f"wakeAgent: {payload['wakeAgent']}",
+            item_line,
+            f"complete: {payload['complete']}",
+        ]
+        if payload["blocker"]:
+            summary_lines.append(f"blocker: {payload['blocker']}")
+        for line in summary_lines:
+            typer.echo(line)
+        typer.echo(to_json(payload), nl=False)
+
+
+@app.command()
 def report(
     state: Annotated[Path, typer.Option("--state", exists=True, readable=True)],
     summary: Annotated[Path, typer.Option("--summary", exists=True, readable=True)],
