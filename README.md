@@ -1,119 +1,55 @@
 # stateful-dev
 
-`stateful-dev` is local-first helper tooling for stateful Hermes cron development workers.
+`stateful-dev` is local-first safety tooling for stateful Hermes cron coding workers.
 
-It turns the worker protocol into executable checks: parse milestone plans, create durable JSON state, validate state drift, enforce legal task transitions, require TDD evidence, and render compact operator reports. It is a safety harness for autonomous coding workers, not a general project manager or orchestration framework.
+It turns a markdown implementation plan into durable worker state, then gives agents and operators checked commands for claiming work, recording evidence, enforcing legal transitions, handling locks, rendering handoffs, and deciding whether a scheduled cron run should wake an agent.
 
-## What it is for
+It is not an autonomous coder, scheduler, PR bot, or project manager. The JSON state file is the execution source of truth; Todoist, Discord, GitHub, and other systems are visibility or transport layers.
 
-Use `stateful-dev` when a cron-launched coding worker needs to work through plan files one item at a time while preserving durable progress state.
+## Why it exists
 
-It helps answer:
+Cron-launched coding workers are useful but brittle when progress only lives in prompts or hand-edited JSON. `stateful-dev` makes the worker lifecycle explicit and inspectable:
 
-- Which plan item is active?
-- Is the state file still valid?
-- Did counts drift from item statuses?
-- Did the worker prove RED before GREEN?
-- Did the worker run the focused test, full suite, and lint gates before success?
-- What compact status should be sent to the operator?
+- parse plan files into stable item IDs
+- store progress in `.agent-state/<worker>/state.json`
+- validate state shape, counts, locks, and drift
+- claim exactly one eligible item per run
+- enforce legal status transitions
+- require RED/GREEN/full-suite evidence before success
+- render compact status, completion audits, and operator handoffs
+- provide a deterministic Hermes cron wake/skip gate
 
-## What it is not
-
-`stateful-dev` does not write code, schedule agents, manage PRs, or replace Todoist. Todoist and similar trackers are visibility layers; the JSON state file remains the execution source of truth.
-
-Non-goals for v1:
-
-- autonomous code generation
-- multi-agent scheduling
-- GitHub PR automation
-- database-backed coordination
-- GUI/TUI workflow management
-- unsupervised live side effects
-
-## Core workflow
+## Architecture
 
 ```text
-Markdown milestone plans
+markdown plan files
         │
         ▼
-plan_parser.py
+stateful-dev init / state sync-plans
         │
         ▼
-durable JSON state file
+.agent-state/<worker>/state.json
         │
-        ├── doctor/state.py validates shape and counts
-        ├── transitions.py enforces legal progress and evidence
-        ├── reports.py renders operator/status summaries
-        └── locking.py provides filesystem lock primitives
-        │
-        ▼
-Typer CLI
+        ├── doctor/status/complete validate operator-visible state
+        ├── claim/transition/record move one item through the lifecycle
+        ├── lock/run commands preserve resumability
+        ├── handoff/report render compact operator context
+        └── cron-gate emits Hermes wake/skip JSON
         │
         ▼
-Hermes plugin wrapper
+Hermes plugin + Hermes cron script wrappers
 ```
 
-## Features
+For script-backed cron workers, the responsibility boundary is strict:
 
-### Plan parsing
+| Layer | Responsibility |
+| --- | --- |
+| Hermes cron | schedules jobs, runs optional pre-run scripts, launches the agent |
+| `~/.hermes/scripts/stateful_dev_<worker>_gate.py` | thin per-worker adapter: `chdir`, call `stateful-dev cron-gate`, preserve JSON/exit semantics |
+| `stateful-dev cron-gate` | deterministic local wake/skip/claim decision engine |
+| Hermes agent | coding executor; does not decide whether work should be claimed |
 
-`stateful-dev init` parses milestone plans with task headings:
-
-```markdown
-## Task 1: Add the first capability
-```
-
-Each task becomes a state item with a stable ID derived from the plan filename, task number, and title.
-
-### State validation
-
-`stateful-dev doctor` validates durable worker state and reports:
-
-- required top-level keys
-- item list shape
-- missing or duplicate item IDs
-- invalid statuses
-- count drift between `counts` and item statuses
-
-Example:
-
-```bash
-stateful-dev doctor --state .agent-state/stateful-dev-worker/state.json --json
-```
-
-### Legal transitions
-
-`stateful-dev transition` moves one item through the allowed state machine:
-
-```text
-pending -> in_progress -> red_verified -> green_verified -> succeeded
-```
-
-It prevents invalid jumps such as `pending -> succeeded`.
-
-### Evidence gates
-
-Transitions require evidence at the right points:
-
-- `red_verified` requires focused RED command/result evidence.
-- `green_verified` requires prior RED evidence.
-- `succeeded` requires RED, focused GREEN, and full-suite evidence.
-
-### Reports
-
-`stateful-dev report` renders compact batch output for operator updates:
-
-- processed count
-- succeeded/failed/review counts
-- remaining count
-- gate results
-- Todoist visibility fields, if provided
-- state path
-- next action
-
-### Hermes plugin
-
-The plugin wrapper exposes checked library behavior to Hermes tools. The CLI and `stateful_dev` package remain the canonical implementation; plugin tools should stay thin.
+See [`docs/cron-gate-contract.md`](docs/cron-gate-contract.md) for the scheduler contract and [`docs/cron-gate.md`](docs/cron-gate.md) for the runbook.
 
 ## Install
 
@@ -124,7 +60,7 @@ uv tool install .
 stateful-dev --help
 ```
 
-For local development:
+For local development, prefer the project environment:
 
 ```bash
 uv run stateful-dev --help
@@ -132,76 +68,175 @@ uv run pytest -q
 uv run ruff check .
 ```
 
-## Enable the Hermes plugin
+Requires Python 3.11+.
 
-The plugin lives at `plugins/stateful-dev`.
+## Core commands
+
+```bash
+# Inspect the CLI
+uv run stateful-dev --help
+uv run stateful-dev version
+
+# Create state from a markdown plan
+uv run stateful-dev init \
+  --plan docs/plans/example.md \
+  --state .agent-state/my-worker/state.json \
+  --job-name my-worker \
+  --project-root "$PWD" \
+  --json
+
+# Validate and summarize state
+uv run stateful-dev doctor --state .agent-state/my-worker/state.json --json
+uv run stateful-dev status --state .agent-state/my-worker/state.json --json
+
+# Claim work for a run
+uv run stateful-dev claim \
+  --state .agent-state/my-worker/state.json \
+  --run-id "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# Move an item through the evidence-gated lifecycle
+uv run stateful-dev transition --state .agent-state/my-worker/state.json --item-id ITEM --status in_progress
+uv run stateful-dev transition --state .agent-state/my-worker/state.json --item-id ITEM --status red_verified \
+  --evidence-json '{"focused_red_command":"uv run pytest tests/test_feature.py -q","focused_red_result":"exit 1; expected failure"}'
+uv run stateful-dev transition --state .agent-state/my-worker/state.json --item-id ITEM --status green_verified \
+  --evidence-json '{"focused_green_command":"uv run pytest tests/test_feature.py -q","focused_green_result":"exit 0; 1 passed"}'
+uv run stateful-dev transition --state .agent-state/my-worker/state.json --item-id ITEM --status succeeded \
+  --evidence-json '{"full_suite_command":"uv run pytest -q","full_suite_result":"exit 0; suite passed"}'
+```
+
+Important subcommands:
+
+| Command | Purpose |
+| --- | --- |
+| `init` | create initial state from a markdown plan |
+| `doctor` | validate state shape, item statuses, and counts |
+| `status` | summarize active/next work for operators and agents |
+| `claim` | atomically claim one eligible item or return the active item |
+| `transition` | move an item through the legal lifecycle |
+| `record-red`, `record-green`, `record-full-suite`, `record-lint` | append gate evidence |
+| `lock status`, `lock recover` | inspect or recover stale worker locks |
+| `run start`, `run finish`, `run fail` | track per-run lifecycle records |
+| `handoff` | render copy-paste-ready operator context for blocked work |
+| `complete` | audit whether a worker is safe to shut down |
+| `cron-gate` | emit Hermes `wakeAgent` JSON for script-backed cron jobs |
+| `plan lint`, `plan parse` | validate and inspect markdown plan structure |
+| `state sync-plans` | add missing plan items to existing state without mutating statuses |
+| `profile validate`, `profile render` | validate deployment profiles and render executor prompts |
+| `hitl poll-before-run` | poll Poseidon HITL events and stage run markers before claim |
+
+## State model
+
+Plan headings like this become durable items:
+
+```markdown
+## Task 1: Add the first capability
+```
+
+Each item gets a stable ID derived from the plan filename, task number, and title. Items move through the normal success path:
+
+```text
+pending -> in_progress -> red_verified -> green_verified -> succeeded
+```
+
+The state file also supports terminal or operator states such as `blocked`, `failed_final`, `failed_retryable`, `needs_review`, and `skipped`. `doctor` recomputes counts from item statuses and fails on drift or malformed state.
+
+## Script-backed Hermes cron gates
+
+`stateful-dev cron-gate` is the deterministic wake/skip engine for Hermes cron jobs. It checks:
+
+- state validity
+- lock status
+- dirty git state
+- active item resumability
+- eligible item claimability
+- optional Poseidon HITL poll markers
+
+It emits a final JSON line containing `wakeAgent`:
+
+```bash
+uv run stateful-dev cron-gate \
+  --state .agent-state/my-worker/state.json \
+  --project-root "$PWD" \
+  --worker-id my-worker \
+  --run-id "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --json
+```
+
+Current Hermes behavior matters:
+
+- exit `0` + `wakeAgent: true` wakes the agent
+- exit `0` + `wakeAgent: false` skips the agent and suppresses delivery
+- nonzero exit runs the agent through Hermes' script-error path so a blocker can be reported
+
+Wrapper scripts must preserve nonzero `blocker`/`error` exits. Converting them into exit-0 skips makes operator-visible blockers silent.
+
+## Hermes plugin
+
+The plugin lives at [`plugins/stateful-dev`](plugins/stateful-dev). It exposes thin Hermes tool wrappers around tested library behavior.
 
 ```bash
 hermes tools enable ./plugins/stateful-dev
 ```
 
-See [docs/usage.md](docs/usage.md) for the current plugin setup and disposable smoke flow.
+The CLI and `stateful_dev` package remain canonical. Plugin tools should stay thin and JSON-serializable. The plugin manifest and registered plugin tools are mechanically checked.
 
-## CLI
+Plugin tools currently include:
 
-```bash
-stateful-dev version
-stateful-dev init --plan PLAN.md --state STATE.json --job-name JOB --project-root ROOT
-stateful-dev doctor --state STATE.json --json
-stateful-dev transition --state STATE.json --item-id ITEM --status in_progress
-stateful-dev report --state STATE.json --summary RUN_SUMMARY.json
-```
+- `stateful_dev_doctor`
+- `stateful_dev_status`
+- `stateful_dev_transition`
+- `stateful_dev_record_red`
+- `stateful_dev_record_green`
+- `stateful_dev_record_full_suite`
+- `stateful_dev_record_lint`
+- `stateful_dev_claim`
+- `stateful_dev_lock_status`
+- `stateful_dev_lock_recover`
+- `stateful_dev_handoff`
+- `stateful_dev_complete`
+- `stateful_dev_report`
 
-## Usefulness
+## Safety rules for workers
 
-This project is useful for a narrow, real problem: making stateful cron coding workers safer and less dependent on manual JSON edits or implicit protocol memory.
-
-The useful abstraction is:
-
-- plan item
-- durable state
-- legal transition
-- evidence gate
-- compact report
-- thin plugin wrapper
-
-That is enough to turn a fragile agent workflow into something inspectable and recoverable without turning the project into a full orchestration platform.
-
-## Current maturity
-
-This is a hardened v1 for local stateful development workers.
-
-Verified readiness points:
-
-- CLI write paths use lock protection and atomic replace.
-- `init` refuses to overwrite existing state unless explicitly forced.
-- state validation rejects malformed top-level and item field types.
-- evidence validation rejects obvious bogus RED/GREEN result strings.
-- plugin manifest and registered plugin tools are mechanically checked.
-- the documented smoke flow uses only disposable state paths.
-
-Treat `stateful-dev` as local worker infrastructure. Review plans and gates before using it on important state.
-
-## Worker safety rules
-
+- Treat `.agent-state/<worker>/state.json` as authoritative.
 - Process one plan item per run until the workflow is proven.
-- Verify RED before writing production code.
-- Commit only after focused tests, the full suite, and lint pass.
-- Do not push from the worker by default.
-- Stop and request operator review when the plan is ambiguous or RED cannot be proven.
+- Verify RED before implementing production behavior.
+- Record focused GREEN and full-suite evidence before marking success.
+- Commit only after focused checks, full suite, and lint pass.
+- Do not push from workers by default.
+- Stop and request operator review when the plan is ambiguous, RED cannot be proven, state is invalid, or HITL validation fails.
+- Do not hand-edit state unless recovery requires it; prefer CLI/plugin commands.
 
-## Verification
+## Development checks
 
-Before trusting changes:
+Run these before trusting changes:
 
 ```bash
 uv run pytest -q
 uv run ruff check .
-uv run stateful-dev --help
+uv build
 ```
 
-For state changes, also run:
+For wrapper-specific changes, also run the hermetic wrapper tests:
 
 ```bash
-stateful-dev doctor --state .agent-state/stateful-dev-worker/state.json --json
+HOME="$(mktemp -d)" uv run pytest tests/test_wrapper_scripts.py -q
 ```
+
+For real worker state, verify health before and after changes:
+
+```bash
+uv run stateful-dev doctor --state .agent-state/<worker>/state.json --json
+uv run stateful-dev status --state .agent-state/<worker>/state.json --json
+```
+
+## Documentation
+
+- [`docs/usage.md`](docs/usage.md) — CLI/plugin usage and disposable smoke flow
+- [`docs/cron-gate-contract.md`](docs/cron-gate-contract.md) — stable wake/skip JSON contract
+- [`docs/cron-gate.md`](docs/cron-gate.md) — script-backed cron gate runbook
+- [`docs/plans/`](docs/plans/) — milestone and backlog plans used to generate worker state
+
+## Maturity
+
+This is local worker infrastructure for stateful development automation. It is useful because it keeps plan progress, evidence, locks, and wake decisions durable and reviewable. It intentionally stops short of full orchestration: scheduling remains in Hermes cron, code execution remains in the agent, and live side effects remain operator-gated.
