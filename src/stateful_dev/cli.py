@@ -1497,4 +1497,178 @@ def state_sync_plans(
         raise typer.Exit(1)
 
 
+# ── Deployment profile validation ─────────────────────────────────────────────
+
+profile_app = typer.Typer(help="Deployment profile validation and management.")
+
+
+def _validate_deployment_profile(data: dict) -> tuple[list[str], list[str]]:
+    """Validate a deployment profile dict, returning (errors, warnings)."""
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    # Required fields
+    if "project_root" not in data:
+        errors.append("missing required field: project_root")
+    elif not isinstance(data["project_root"], str):
+        errors.append("project_root must be a string")
+    elif not Path(data["project_root"]).exists():
+        errors.append(f"project_root does not exist: {data['project_root']}")
+
+    if "plan_paths" not in data:
+        errors.append("missing required field: plan_paths")
+    elif not isinstance(data["plan_paths"], list):
+        errors.append("plan_paths must be a list")
+    elif len(data["plan_paths"]) == 0:
+        errors.append("plan_paths must not be empty")
+    else:
+        for pp in data["plan_paths"]:
+            if not isinstance(pp, str):
+                errors.append(
+                    f"plan_paths entries must be strings, got: {type(pp).__name__}"
+                )
+                break
+
+    if "state_path" not in data:
+        errors.append("missing required field: state_path")
+    elif not isinstance(data["state_path"], str):
+        errors.append("state_path must be a string")
+
+    # gates section (required)
+    if "gates" not in data:
+        errors.append("missing required field: gates")
+    elif not isinstance(data["gates"], dict):
+        errors.append("gates must be an object")
+    else:
+        if "require_full_suite" not in data["gates"]:
+            errors.append("missing required field in gates: require_full_suite")
+        if "require_lint" not in data["gates"]:
+            errors.append("missing required field in gates: require_lint")
+
+    # todoist mapping (required)
+    if "todoist" not in data:
+        errors.append("missing required field: todoist")
+    elif not isinstance(data["todoist"], dict):
+        errors.append("todoist must be an object")
+    else:
+        if "project_id" not in data["todoist"]:
+            errors.append("missing required field in todoist: project_id")
+
+    # notification_policy (required)
+    if "notification_policy" not in data:
+        errors.append("missing required field: notification_policy")
+    elif not isinstance(data["notification_policy"], dict):
+        errors.append("notification_policy must be an object")
+    else:
+        for key in ("on_blocker", "on_complete"):
+            if key not in data["notification_policy"]:
+                errors.append(f"missing required field in notification_policy: {key}")
+
+    # Optional-but-recommended fields — warn if absent
+    if "script_wrapper" not in data:
+        warnings.append(
+            "recommended field absent: script_wrapper "
+            "(required for script-backed cron gates)"
+        )
+    elif not isinstance(data["script_wrapper"], dict):
+        warnings.append("script_wrapper should be an object when present")
+
+    if "cron_permissions" not in data:
+        warnings.append("recommended field absent: cron_permissions")
+    elif not isinstance(data["cron_permissions"], dict):
+        warnings.append("cron_permissions should be an object when present")
+
+    if "secret_files" not in data:
+        warnings.append(
+            "recommended field absent: secret_files (must be a list if present)"
+        )
+    elif not isinstance(data["secret_files"], list):
+        errors.append("secret_files must be a list")
+
+    return errors, warnings
+
+
+@profile_app.command("validate")
+def profile_validate(
+    profile: Annotated[Path, typer.Option("--profile", readable=True)],
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Validate a deployment_profile.json file.
+
+    Checks for required fields: project_root, plan_paths, state_path, gates,
+    todoist mapping, notification_policy. Warns on recommended-but-optional
+    fields: script_wrapper, cron_permissions, secret_files.
+
+    Exit code 0 if valid, 1 if invalid, 2 if profile file not found.
+    """
+    if not profile.exists():
+        payload = {
+            "valid": False,
+            "profile_path": str(profile),
+            "errors": [f"profile file not found: {profile}"],
+            "warnings": [],
+        }
+        if as_json:
+            typer.echo(to_json(payload), nl=False)
+        else:
+            typer.echo(f"profile not found: {profile}")
+        raise typer.Exit(2)
+
+    try:
+        data = json.loads(profile.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            payload = {
+                "valid": False,
+                "profile_path": str(profile),
+                "errors": [
+                    f"profile must be a JSON object, got: {type(data).__name__}"
+                ],
+                "warnings": [],
+            }
+            if as_json:
+                typer.echo(to_json(payload), nl=False)
+            else:
+                typer.echo(f"invalid: {payload['errors'][0]}")
+            raise typer.Exit(1)
+    except json.JSONDecodeError as exc:
+        payload = {
+            "valid": False,
+            "profile_path": str(profile),
+            "errors": [f"invalid JSON: {exc.msg} at line {exc.lineno}"],
+            "warnings": [],
+        }
+        if as_json:
+            typer.echo(to_json(payload), nl=False)
+        else:
+            typer.echo(f"invalid JSON: {exc.msg}")
+        raise typer.Exit(1) from exc
+
+    errors, warnings = _validate_deployment_profile(data)
+    valid = len(errors) == 0
+
+    payload = {
+        "valid": valid,
+        "profile_path": str(profile),
+        "errors": errors,
+        "warnings": warnings,
+    }
+
+    if as_json:
+        typer.echo(to_json(payload), nl=False)
+    else:
+        if valid:
+            typer.echo(f"valid: {profile}")
+            for w in warnings:
+                typer.echo(f"  warning: {w}")
+        else:
+            typer.echo(f"invalid: {profile}")
+            for e in errors:
+                typer.echo(f"  error: {e}")
+            for w in warnings:
+                typer.echo(f"  warning: {w}")
+
+    raise typer.Exit(0 if valid else 1)
+
+
+app.add_typer(profile_app, name="profile")
 app.add_typer(state_app, name="state")
