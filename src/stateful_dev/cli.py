@@ -17,6 +17,7 @@ from stateful_dev.output import to_json
 from stateful_dev.plan_parser import parse_plan_tasks
 from stateful_dev.reports import render_batch_report
 from stateful_dev.state import VALID_STATUSES, validate_state
+from stateful_dev.status import build_status, render_status
 from stateful_dev.transitions import transition_item
 
 app = typer.Typer(help="Stateful development worker utilities.")
@@ -151,6 +152,21 @@ def init(
         typer.echo(to_json(payload), nl=False)
     else:
         typer.echo(f"initialized {len(payload['items'])} item(s)")
+
+
+@app.command()
+def status(
+    state: Annotated[Path, typer.Option("--state", exists=True, readable=True)],
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Summarize worker lifecycle status for operators and cron workers."""
+    payload = build_status(state, _load_json(state))
+    if as_json:
+        typer.echo(to_json(payload), nl=False)
+    else:
+        typer.echo(render_status(payload), nl=False)
+    if not payload["ok"]:
+        raise typer.Exit(1)
 
 
 @app.command()
