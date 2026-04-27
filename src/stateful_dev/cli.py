@@ -103,9 +103,39 @@ def version() -> None:
 def doctor(
     state: Annotated[Path, typer.Option("--state", exists=True, readable=True)],
     as_json: Annotated[bool, typer.Option("--json")] = False,
+    fix_counts: Annotated[bool, typer.Option("--fix-counts")] = False,
+    backup: Annotated[bool, typer.Option("--backup")] = False,
 ) -> None:
-    """Validate a durable worker state file."""
+    """Validate a durable worker state file.
+
+    With --fix-counts: recompute counts from items and repair mechanical count drift.
+    Item statuses are never mutated. Use --backup to create a timestamped .bak file
+    before applying the fix.
+    """
     data = json.loads(state.read_text(encoding="utf-8"))
+
+    if fix_counts:
+        import shutil
+
+        # Backup before touching anything when --backup is set
+        if backup:
+            label = "pre-fix-counts"
+            ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+            bak_path = state.with_name(f"{state.name}.bak.{label}.{ts}")
+            shutil.copy2(state, bak_path)
+
+        # Recompute counts from items — never mutate item statuses
+        counts = {s: 0 for s in VALID_STATUSES}
+        for item in data.get("items", []):
+            s = item.get("status")
+            if s in counts:
+                counts[s] += 1
+        data["counts"] = counts
+        data["updated_at"] = datetime.now(UTC).isoformat()
+
+        # Write fixed state back atomically
+        _write_json(state, data)
+
     result = validate_state(data)
     payload = {
         "ok": result.ok,
@@ -119,6 +149,34 @@ def doctor(
         typer.echo("ok" if result.ok else "invalid")
     if not result.ok:
         raise typer.Exit(1)
+
+
+@app.command()
+def backup(
+    state: Annotated[Path, typer.Option("--state", exists=True, readable=True)],
+    label: Annotated[str, typer.Option("--label")],
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Create a timestamped backup copy of a state file.
+
+    The backup is written next to the original as <state>.bak.<label>.<timestamp>.
+    The original is never modified.
+    """
+    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    bak_path = state.with_name(f"{state.name}.bak.{label}.{ts}")
+    import shutil
+
+    shutil.copy2(state, bak_path)
+    payload = {
+        "backup_path": str(bak_path),
+        "backup_at": datetime.now(UTC).isoformat(),
+        "original_path": str(state),
+        "label": label,
+    }
+    if as_json:
+        typer.echo(to_json(payload), nl=False)
+    else:
+        typer.echo(f"backed up {state} -> {bak_path}")
 
 
 @app.command()
