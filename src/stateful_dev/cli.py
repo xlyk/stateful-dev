@@ -1670,5 +1670,124 @@ def profile_validate(
     raise typer.Exit(0 if valid else 1)
 
 
+@profile_app.command("render")
+def profile_render(
+    profile: Annotated[Path, typer.Option("--profile", readable=True)],
+    item_id: Annotated[str, typer.Option("--item-id")],
+    item_title: Annotated[str, typer.Option("--item-title")],
+    item_status: Annotated[str, typer.Option("--item-status")],
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Render a worker prompt from a validated deployment profile.
+
+    Validates the profile first (exit 1 if invalid). Requires an
+    executor_prompt_template field in the profile. Substitutes {item_id},
+    {item_title}, and {item_status} into the template.
+
+    Exit 0 if rendered successfully, 1 if profile is invalid or template is
+    missing, 2 if profile file is not found.
+    """
+    if not profile.exists():
+        payload = {
+            "valid": False,
+            "profile_path": str(profile),
+            "errors": [f"profile file not found: {profile}"],
+            "warnings": [],
+        }
+        if as_json:
+            typer.echo(to_json(payload), nl=False)
+        else:
+            typer.echo(f"profile not found: {profile}")
+        raise typer.Exit(2)
+
+    try:
+        data = json.loads(profile.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            payload = {
+                "valid": False,
+                "profile_path": str(profile),
+                "errors": [
+                    f"profile must be a JSON object, got: {type(data).__name__}"
+                ],
+                "warnings": [],
+            }
+            if as_json:
+                typer.echo(to_json(payload), nl=False)
+            else:
+                typer.echo(f"invalid: {payload['errors'][0]}")
+            raise typer.Exit(1)
+    except json.JSONDecodeError as exc:
+        payload = {
+            "valid": False,
+            "profile_path": str(profile),
+            "errors": [f"invalid JSON: {exc.msg} at line {exc.lineno}"],
+            "warnings": [],
+        }
+        if as_json:
+            typer.echo(to_json(payload), nl=False)
+        else:
+            typer.echo(f"invalid JSON: {exc.msg}")
+        raise typer.Exit(1) from exc
+
+    errors: list[str] = []
+    warnings: list[str] = []
+
+    # Validate required profile fields
+    if "project_root" not in data:
+        errors.append("missing required field: project_root")
+    elif not isinstance(data["project_root"], str):
+        errors.append("project_root must be a string")
+
+    if "executor_prompt_template" not in data:
+        errors.append(
+            "missing required field: executor_prompt_template "
+            "(rendering requires a template)"
+        )
+    elif not isinstance(data["executor_prompt_template"], str):
+        errors.append("executor_prompt_template must be a string")
+    elif not data["executor_prompt_template"].strip():
+        errors.append("executor_prompt_template must not be empty")
+
+    if errors:
+        payload = {
+            "valid": False,
+            "profile_path": str(profile),
+            "errors": errors,
+            "warnings": warnings,
+        }
+        if as_json:
+            typer.echo(to_json(payload), nl=False)
+        else:
+            typer.echo("profile is invalid:")
+            for e in errors:
+                typer.echo(f"  error: {e}")
+        raise typer.Exit(1)
+
+    template = data["executor_prompt_template"]
+    rendered_prompt = template.format(
+        item_id=item_id,
+        item_title=item_title,
+        item_status=item_status,
+    )
+
+    payload = {
+        "valid": True,
+        "profile_path": str(profile),
+        "rendered_prompt": rendered_prompt,
+        "item_id": item_id,
+        "item_title": item_title,
+        "item_status": item_status,
+        "errors": errors,
+        "warnings": warnings,
+    }
+
+    if as_json:
+        typer.echo(to_json(payload), nl=False)
+    else:
+        typer.echo(rendered_prompt)
+
+    raise typer.Exit(0)
+
+
 app.add_typer(profile_app, name="profile")
 app.add_typer(state_app, name="state")
