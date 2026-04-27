@@ -379,6 +379,13 @@ def hitl_poll_ok_for_run(
         return False, f"failed to read poll marker for run {run_id}"
 
     hitl_poll = marker.get("hitl_poll", {})
+    marker_run_id = marker.get("run_id")
+    if marker_run_id != run_id:
+        reason = (
+            f"poll marker run_id mismatch for run {run_id}: "
+            f"marker has {marker_run_id!r}"
+        )
+        return False, reason
     if not isinstance(hitl_poll, dict):
         return False, f"hitl_poll missing or invalid in run marker for {run_id}"
 

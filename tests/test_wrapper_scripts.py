@@ -99,6 +99,8 @@ _WRAPPER_SOURCE = textwrap.dedent("""\
                 continue
         if last_json:
             print(last_json, flush=True)
+            if exit_code != 0:
+                sys.exit(exit_code)
             return
         if exit_code != 0:
             _emit_json({{
@@ -118,7 +120,7 @@ _WRAPPER_SOURCE = textwrap.dedent("""\
                 "complete": False,
                 "message": "Internal error in gate wrapper script.",
             }})
-            return
+            sys.exit(exit_code)
         print(stdout.rstrip(), flush=True)
 
     if __name__ == "__main__":
@@ -180,23 +182,24 @@ def _last_json_from_stdout(stdout: str) -> dict[str, Any]:
     return json.loads(lines[-1])
 
 
-def _capture_main(mod: Any) -> tuple[str, str]:
-    """Call mod.main() and capture stdout/stderr as strings."""
+def _capture_main(mod: Any) -> tuple[str, str, int]:
+    """Call mod.main() and capture stdout/stderr/exit code."""
     old_stdout = sys.stdout
     old_stderr = sys.stderr
     try:
         sys.stdout = StringIO()
         sys.stderr = StringIO()
+        exit_code = 0
         try:
             mod.main()
-        except SystemExit:
-            pass
+        except SystemExit as exc:
+            exit_code = exc.code if isinstance(exc.code, int) else 1
         stdout = sys.stdout.getvalue()
         stderr = sys.stderr.getvalue()
     finally:
         sys.stdout = old_stdout
         sys.stderr = old_stderr
-    return stdout, stderr
+    return stdout, stderr, exit_code
 
 
 def _make_fake_run(
@@ -268,7 +271,7 @@ class TestWrapperScriptOutput:
     def _eligible_contract(self, run_id: str = "fake-run-id") -> dict[str, Any]:
         return {
             "wakeAgent": True,
-            "mode": "run",
+            "mode": "wake",
             "worker_id": DEMO_WORKER_ID,
             "run_id": run_id,
             "project_root": str(DEMO_PROJECT_ROOT),
@@ -293,7 +296,8 @@ class TestWrapperScriptOutput:
 
     def test_wrapper_runs_without_error(self, wrapper_module: Any) -> None:
         self._patch_run(wrapper_module, self._eligible_contract())
-        stdout, stderr = _capture_main(wrapper_module)
+        stdout, stderr, exit_code = _capture_main(wrapper_module)
+        assert exit_code == 0
         # stderr may contain diagnostics — that is fine.
         lines = _stdout_lines(stdout)
         assert lines, "No stdout produced"
@@ -302,7 +306,8 @@ class TestWrapperScriptOutput:
 
     def test_emits_valid_json_on_last_line(self, wrapper_module: Any) -> None:
         self._patch_run(wrapper_module, self._eligible_contract())
-        stdout, _ = _capture_main(wrapper_module)
+        stdout, _, exit_code = _capture_main(wrapper_module)
+        assert exit_code == 0
         lines = _stdout_lines(stdout)
         assert lines, "No stdout lines found"
         try:
@@ -315,7 +320,8 @@ class TestWrapperScriptOutput:
 
     def test_emits_required_contract_fields(self, wrapper_module: Any) -> None:
         self._patch_run(wrapper_module, self._eligible_contract())
-        stdout, _ = _capture_main(wrapper_module)
+        stdout, _, exit_code = _capture_main(wrapper_module)
+        assert exit_code == 0
         payload = _last_json_from_stdout(stdout)
         required_fields = [
             "wakeAgent", "mode", "worker_id", "run_id",
@@ -328,19 +334,22 @@ class TestWrapperScriptOutput:
 
     def test_uses_correct_worker_id(self, wrapper_module: Any) -> None:
         self._patch_run(wrapper_module, self._eligible_contract())
-        stdout, _ = _capture_main(wrapper_module)
+        stdout, _, exit_code = _capture_main(wrapper_module)
+        assert exit_code == 0
         payload = _last_json_from_stdout(stdout)
         assert payload["worker_id"] == DEMO_WORKER_ID
 
     def test_project_root_is_correct(self, wrapper_module: Any) -> None:
         self._patch_run(wrapper_module, self._eligible_contract())
-        stdout, _ = _capture_main(wrapper_module)
+        stdout, _, exit_code = _capture_main(wrapper_module)
+        assert exit_code == 0
         payload = _last_json_from_stdout(stdout)
         assert payload["project_root"] == str(DEMO_PROJECT_ROOT)
 
     def test_state_path_is_correct(self, wrapper_module: Any) -> None:
         self._patch_run(wrapper_module, self._eligible_contract())
-        stdout, _ = _capture_main(wrapper_module)
+        stdout, _, exit_code = _capture_main(wrapper_module)
+        assert exit_code == 0
         payload = _last_json_from_stdout(stdout)
         assert payload["state_path"] == str(DEMO_STATE)
 
@@ -355,7 +364,8 @@ class TestWrapperScriptOutput:
             wrapper_module, contract,
             stderr="uv warning: some stderr noise here\n",
         )
-        stdout, _ = _capture_main(wrapper_module)
+        stdout, _, exit_code = _capture_main(wrapper_module)
+        assert exit_code == 0
         lines = _stdout_lines(stdout)
         assert lines, "No stdout lines found"
         assert lines[-1].startswith("{"), (
@@ -376,18 +386,57 @@ class TestWrapperScriptOutput:
             return 1, "some stdout that is not json\n", ""
         wrapper_module._run_cron_gate = fake_error_run
         wrapper_module.subprocess = mock.MagicMock()
-        stdout, _ = _capture_main(wrapper_module)
+        stdout, _, exit_code = _capture_main(wrapper_module)
+        assert exit_code != 0
         payload = _last_json_from_stdout(stdout)
         assert payload.get("wakeAgent") is False, (
             f"Expected wakeAgent: false on error, got: {payload.get('wakeAgent')}"
         )
         assert payload.get("mode") == "error"
 
+
+    def test_preserves_nonzero_exit_with_valid_blocker_json(
+        self, wrapper_module: Any
+    ) -> None:
+        """Nonzero blocker JSON must not become Hermes silent skip success."""
+        contract = {
+            **self._eligible_contract(),
+            "wakeAgent": False,
+            "mode": "blocker",
+            "blocker": "dirty git",
+            "message": "Resolve dirty git before running.",
+        }
+        self._patch_run(wrapper_module, contract, exit_code=1)
+        stdout, _, exit_code = _capture_main(wrapper_module)
+        assert exit_code != 0
+        payload = _last_json_from_stdout(stdout)
+        assert payload["mode"] == "blocker"
+        assert payload["wakeAgent"] is False
+
+    def test_preserves_nonzero_exit_with_valid_error_json(
+        self, wrapper_module: Any
+    ) -> None:
+        """Nonzero error JSON must wake Hermes through Script Error."""
+        contract = {
+            **self._eligible_contract(),
+            "wakeAgent": False,
+            "mode": "error",
+            "blocker": "internal wrapper bug",
+            "message": "File a bug report.",
+        }
+        self._patch_run(wrapper_module, contract, exit_code=1)
+        stdout, _, exit_code = _capture_main(wrapper_module)
+        assert exit_code != 0
+        payload = _last_json_from_stdout(stdout)
+        assert payload["mode"] == "error"
+        assert payload["wakeAgent"] is False
+
     def test_emits_complete_true_when_no_work(self, wrapper_module: Any) -> None:
         """When cron-gate signals complete, wrapper must pass it through."""
         contract = {**self._eligible_contract(), "complete": True, "message": "done"}
         self._patch_run(wrapper_module, contract)
-        stdout, _ = _capture_main(wrapper_module)
+        stdout, _, exit_code = _capture_main(wrapper_module)
+        assert exit_code == 0
         payload = _last_json_from_stdout(stdout)
         assert payload.get("complete") is True
 

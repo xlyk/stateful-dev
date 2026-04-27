@@ -265,6 +265,47 @@ class TestClaimHITLIntegration:
         assert payload["claimed"] is True
         assert payload["item"]["id"] == "plan:T1"
 
+    def test_claim_refuses_when_poll_marker_run_id_mismatches(
+        self, tmp_path: Path
+    ) -> None:
+        """The run marker's embedded run_id must match the claimed run."""
+        state_path = tmp_path / "state.json"
+        hitl = {
+            "enabled": True,
+            "provider": "poseidon",
+            "node_id": "test-node",
+            "worker_id": "test-worker",
+            "state_path_hash": "sha256:abc123",
+            "poll_policy": "required",
+            "active_requests": [],
+        }
+        _write_state_with_hitl(
+            state_path,
+            hitl_config=hitl,
+            items=[{
+                "id": "plan:T1",
+                "title": "One",
+                "status": "pending",
+                "attempts": 0,
+            }],
+        )
+        runs_dir = state_path.parent / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        (runs_dir / "run-1.json").write_text(json.dumps({
+            "run_id": "different-run",
+            "hitl_poll": {
+                "required": True,
+                "ok": True,
+                "completed_at": "2026-04-27T10:00:00Z",
+                "worker_id": "test-worker",
+                "request_ids": [],
+            },
+        }), encoding="utf-8")
+
+        exit_code, output = _claim(state_path, "run-1")
+        assert exit_code == 1
+        assert "run_id" in output or "mismatch" in output.lower()
+
 
 class TestHITLPollCommandExists:
     """The hitl poll-before-run command exists and accepts required arguments."""

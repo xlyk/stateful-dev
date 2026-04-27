@@ -1,6 +1,19 @@
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_pytest_local_wrapper_marker_is_registered() -> None:
+    """Opt-in live wrapper tests must not emit unknown-marker warnings."""
+    pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    markers = (
+        pyproject.get("tool", {})
+        .get("pytest", {})
+        .get("ini_options", {})
+        .get("markers", [])
+    )
+    assert any(marker.startswith("local_wrapper:") for marker in markers)
 
 
 def test_cron_gate_contract_doc_exists_and_defines_required_fields() -> None:
@@ -34,6 +47,10 @@ def test_cron_gate_contract_doc_exists_and_defines_required_fields() -> None:
     assert "nonzero" in content.lower() and "exit" in content.lower()
     # Must document blocker vs script-bug behavior
     assert "blocker" in content.lower() and "script" in content.lower()
+    assert "current hermes has no built-in mode" in content.lower()
+    assert "exit nonzero" in content.lower()
+    assert "script error" in content.lower()
+    assert "No | No (delivery sent)" not in content
 
     # Must have example payloads for wake, skip, and blocker
     import json

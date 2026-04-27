@@ -60,10 +60,12 @@ Hermes cron scheduler  →  runs script  →  last non-empty stdout line is JSON
 
 ## Nonzero Exit Semantics
 
-- **Exit 0** — Script succeeded. Parse last non-empty stdout line for `wakeAgent` value.
-- **Exit nonzero** — Script encountered an internal error. Treat as `mode: error` regardless of stdout content.
-  - If the last non-empty stdout line already contains valid `wakeAgent: false`, prefer that as the safe skip signal.
-  - If stdout is empty or invalid, Hermes treats this as a script bug (not a business blocker).
+- **Exit 0** — Script succeeded. Hermes parses the last non-empty stdout line for `wakeAgent`.
+- **Exit 0 + `wakeAgent: false`** — Hermes skips the agent and suppresses delivery. This is safe only for idle `skip`.
+- **Exit nonzero** — Hermes treats the pre-run script as failed, injects `## Script Error` into the prompt, and runs the agent so it can report the blocker/error.
+- Current Hermes has no built-in mode for "do not run the agent, but still deliver a blocker notification."
+
+Wrappers must not convert nonzero `blocker` or `error` results into exit-0 `wakeAgent:false` output. Doing so turns an operator-visible blocker into a silent skip.
 
 ---
 
@@ -72,14 +74,14 @@ Hermes cron scheduler  →  runs script  →  last non-empty stdout line is JSON
 | Condition | mode | Exit | Agent runs? | Delivery suppressed? | Operator action |
 |---|---|---|---|---|---|
 | No eligible work | `skip` | Exit 0 | No | Yes | None — expected idle |
-| State invalid | `blocker` | Exit 1 | No | No (delivery sent) | Must resolve state |
-| Lock held, not stale | `blocker` | Exit 1 | No | No | Wait for lock holder |
-| HITL poll required but failed | `blocker` | Exit 1 | No | No | Must resolve poll |
-| Dirty git with uncommitted changes | `blocker` | Exit 1 | No | No | Must commit or stash |
-| Script internal error | `error` | Exit 1 | No | No | File a bug report |
-| Work available | `wake` | Exit 0 | Yes | No | None — expected |
+| State invalid | `blocker` | Exit 1 | Yes, through `## Script Error` | No | Must resolve state |
+| Lock held, not stale | `blocker` | Exit 1 | Yes, through `## Script Error` | No | Wait for lock holder |
+| HITL poll required but failed | `blocker` | Exit 1 | Yes, through `## Script Error` | No | Must resolve poll |
+| Dirty git with uncommitted changes | `blocker` | Exit 1 | Yes, through `## Script Error` | No | Must commit or stash |
+| Script internal error | `error` | Exit 1 | Yes, through `## Script Error` | No | File a bug report |
+| Work available | `wake` | Exit 0 | Yes, through `## Script Output` | No | None — expected |
 
-> **Note:** `blocker` and `error` modes exit non-zero (Exit 1) to trigger Hermes notification. The JSON payload is still printed to stdout so the last-line JSON rule is preserved. Non-zero exit without valid JSON in stdout would be treated as a script bug.
+> **Note:** `blocker` and `error` modes exit nonzero to trigger Hermes' current notification path. The JSON payload is still printed to stdout so the script-error prompt contains structured context. A future Hermes scheduler could add explicit no-agent blocker delivery, but current Hermes does not provide that behavior.
 
 A `blocker` is a business condition that requires operator action before the worker can proceed.
 An `error` is a script bug that requires a fix before the worker can proceed.
