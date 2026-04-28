@@ -9,7 +9,9 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
+import stateful_dev.hitl_poseidon as hp
 from stateful_dev.cli import app
+from stateful_dev.hitl_poseidon import PollResult
 
 
 def _write_state_with_hitl(
@@ -316,6 +318,55 @@ class TestHITLPollCommandExists:
         # Command may not exist yet — this is the RED
         assert result.exit_code == 0
         assert "poll" in result.output.lower()
+
+    def test_required_hitl_poll_failure_exits_nonzero(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Required HITL polling must fail closed when Poseidon poll fails."""
+        state_path = tmp_path / "state.json"
+
+        def fake_poll_poseidon(**kwargs):
+            return PollResult(ok=False, error="connection refused")
+
+        _write_state_with_hitl(
+            state_path,
+            hitl_config={
+                "enabled": True,
+                "provider": "poseidon",
+                "node_id": "test-node",
+                "worker_id": "test-worker",
+                "state_path_hash": "sha256:abc123",
+                "poll_policy": "required",
+                "active_requests": [],
+            },
+            items=[{"id": "plan:T1", "title": "One", "status": "pending"}],
+        )
+        token_path = tmp_path / "node-token"
+        token_path.write_text("token", encoding="utf-8")
+
+        monkeypatch.setattr(hp, "poll_poseidon", fake_poll_poseidon)
+
+        result = CliRunner().invoke(
+            app,
+            [
+                "hitl",
+                "poll-before-run",
+                "--state",
+                str(state_path),
+                "--run-id",
+                "run-1",
+                "--base-url",
+                "https://poseidon.invalid",
+                "--node-token-file",
+                str(token_path),
+                "--json",
+            ],
+        )
+
+        assert result.exit_code == 1
+        payload = json.loads(result.stdout)
+        assert payload["ok"] is False
+        assert payload["error"] == "connection refused"
 
 
 class TestPoseidonPollingModule:

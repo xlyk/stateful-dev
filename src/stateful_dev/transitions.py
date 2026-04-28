@@ -56,6 +56,32 @@ def _has_recorded_fields(item: dict[str, Any], required_fields: set[str]) -> boo
     return any(_has_fields(entry, required_fields) for entry in _evidence_entries(item))
 
 
+def _available_evidence(
+    item: dict[str, Any],
+    evidence: dict[str, Any] | None,
+    required_fields: set[str],
+) -> list[dict[str, Any]]:
+    entries: list[dict[str, Any]] = []
+    if _has_fields(evidence, required_fields):
+        entries.append(evidence)  # type: ignore[arg-type]
+    if _has_fields(item, required_fields):
+        entries.append(item)
+    entries.extend(
+        entry
+        for entry in _evidence_entries(item)
+        if _has_fields(entry, required_fields)
+    )
+    return entries
+
+
+def _has_available_fields(
+    item: dict[str, Any],
+    evidence: dict[str, Any] | None,
+    required_fields: set[str],
+) -> bool:
+    return bool(_available_evidence(item, evidence, required_fields))
+
+
 def _has_red_evidence(item: dict[str, Any]) -> bool:
     return _has_recorded_fields(item, {"focused_red_command", "focused_red_result"})
 
@@ -99,34 +125,55 @@ def _looks_failed(result: str) -> bool:
 
 
 def _require_result_semantics(
-    target_status: str, evidence: dict[str, Any] | None
+    target_status: str,
+    item: dict[str, Any],
+    evidence: dict[str, Any] | None,
 ) -> None:
-    red_result = _result_text(evidence, "focused_red_result")
-    if (
-        target_status == "red_verified"
-        and _looks_successful(red_result)
-        and not _looks_failed(red_result)
-    ):
-        raise IllegalTransitionError("RED evidence result appears to be a success")
+    red_entries = _available_evidence(
+        item, evidence, {"focused_red_command", "focused_red_result"}
+    )
+    if target_status in {"red_verified", "green_verified", "succeeded"}:
+        for entry in red_entries:
+            red_result = _result_text(entry, "focused_red_result")
+            if _looks_successful(red_result) and not _looks_failed(red_result):
+                raise IllegalTransitionError(
+                    "RED evidence result appears to be a success"
+                )
 
-    if target_status == "green_verified" and _looks_failed(
-        _result_text(evidence, "focused_green_result")
-    ):
-        raise IllegalTransitionError("GREEN evidence result appears to be a failure")
+    green_entries = _available_evidence(
+        item, evidence, {"focused_green_command", "focused_green_result"}
+    )
+    if target_status in {"green_verified", "succeeded"}:
+        for entry in green_entries:
+            if _looks_failed(_result_text(entry, "focused_green_result")):
+                raise IllegalTransitionError(
+                    "GREEN evidence result appears to be a failure"
+                )
 
-    if target_status == "succeeded" and _looks_failed(
-        _result_text(evidence, "full_suite_result")
-    ):
-        raise IllegalTransitionError(
-            "full suite evidence result appears to be a failure"
-        )
+    full_suite_entries = _available_evidence(
+        item, evidence, {"full_suite_command", "full_suite_result"}
+    )
+    if target_status == "succeeded":
+        for entry in full_suite_entries:
+            if _looks_failed(_result_text(entry, "full_suite_result")):
+                raise IllegalTransitionError(
+                    "full suite evidence result appears to be a failure"
+                )
+
+
+def require_evidence_result_semantics(
+    target_status: str,
+    evidence: dict[str, Any],
+) -> None:
+    """Validate one standalone evidence entry before recording it."""
+    _require_result_semantics(target_status, {}, evidence)
 
 
 def _require_transition_evidence(
     item: dict[str, Any], target_status: str, evidence: dict[str, Any] | None
 ) -> None:
-    if target_status == "red_verified" and not _has_fields(
-        evidence, {"focused_red_command", "focused_red_result"}
+    if target_status == "red_verified" and not _has_available_fields(
+        item, evidence, {"focused_red_command", "focused_red_result"}
     ):
         raise IllegalTransitionError(
             "red_verified requires focused RED command and result evidence"
@@ -135,20 +182,26 @@ def _require_transition_evidence(
     if target_status == "green_verified" and not _has_red_evidence(item):
         raise IllegalTransitionError("green_verified requires RED evidence")
 
+    if target_status == "green_verified" and not _has_available_fields(
+        item, evidence, {"focused_green_command", "focused_green_result"}
+    ):
+        raise IllegalTransitionError(
+            "green_verified requires focused GREEN evidence"
+        )
+
     if target_status == "succeeded":
         if not _has_red_evidence(item):
             raise IllegalTransitionError("succeeded requires RED evidence")
-        if not _has_recorded_fields(
-            item, {"focused_green_command", "focused_green_result"}
+        if not _has_available_fields(
+            item, evidence, {"focused_green_command", "focused_green_result"}
         ):
             raise IllegalTransitionError("succeeded requires focused GREEN evidence")
-        if not (
-            _has_recorded_fields(item, {"full_suite_command", "full_suite_result"})
-            or _has_fields(evidence, {"full_suite_command", "full_suite_result"})
+        if not _has_available_fields(
+            item, evidence, {"full_suite_command", "full_suite_result"}
         ):
             raise IllegalTransitionError("succeeded requires full suite evidence")
 
-    _require_result_semantics(target_status, evidence)
+    _require_result_semantics(target_status, item, evidence)
 
 
 def _apply_evidence_flags(

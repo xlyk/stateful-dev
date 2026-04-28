@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -65,9 +66,23 @@ def _write_metadata(lock_path: Path, run_id: str) -> None:
 def write_json_atomic(path: Path | str, data: dict[str, Any]) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = target.with_name(f"{target.name}.tmp")
-    temp_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    temp_path.replace(target)
+    temp_file = tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=target.parent,
+        prefix=f"{target.name}.",
+        suffix=".tmp",
+        delete=False,
+    )
+    temp_path = Path(temp_file.name)
+    try:
+        with temp_file:
+            temp_file.write(json.dumps(data, indent=2) + "\n")
+            temp_file.flush()
+        temp_path.replace(target)
+    except Exception:
+        temp_path.unlink(missing_ok=True)
+        raise
 
 
 def acquire_lock(state_dir: Path | str, run_id: str, timeout_minutes: int) -> StateLock:

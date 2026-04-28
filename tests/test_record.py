@@ -132,6 +132,46 @@ class TestRecordRed:
         assert data["item_id"] == "plan:T1-test"
         assert "focused_red_command" in data["evidence_keys"]
 
+    def test_record_red_rejects_empty_command_and_result(self, tmp_path: Path):
+        """record-red requires non-empty command and result values."""
+        state_path = _make_state(tmp_path)
+        result = runner.invoke(
+            app,
+            [
+                "record-red",
+                "--state",
+                str(state_path),
+                "--item-id",
+                "plan:T1-test",
+                "--command",
+                "",
+                "--result",
+                "",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "must not be empty" in result.output
+
+    def test_record_red_rejects_successful_result(self, tmp_path: Path):
+        """RED evidence must describe an expected failure, not a pass."""
+        state_path = _make_state(tmp_path)
+        result = runner.invoke(
+            app,
+            [
+                "record-red",
+                "--state",
+                str(state_path),
+                "--item-id",
+                "plan:T1-test",
+                "--command",
+                RED_CMD,
+                "--result",
+                "exit 0; 1 passed",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "RED evidence result appears to be a success" in result.output
+
 
 class TestRecordGreen:
     def test_record_green_requires_red_evidence_first(self, tmp_path: Path):

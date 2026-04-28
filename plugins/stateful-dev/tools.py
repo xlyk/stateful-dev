@@ -196,9 +196,26 @@ def _record_evidence(
         release_lock,
         write_json_atomic,
     )
-    from stateful_dev.transitions import _has_red_evidence
+    from stateful_dev.transitions import (
+        IllegalTransitionError,
+        _has_red_evidence,
+        require_evidence_result_semantics,
+    )
 
-    evidence = {f"focused_{gate}_command": command, f"focused_{gate}_result": result}
+    if gate == "red":
+        evidence = {"focused_red_command": command, "focused_red_result": result}
+        target_status = "red_verified"
+    elif gate == "green":
+        evidence = {"focused_green_command": command, "focused_green_result": result}
+        target_status = "green_verified"
+    elif gate == "full_suite":
+        evidence = {"full_suite_command": command, "full_suite_result": result}
+        target_status = "succeeded"
+    elif gate == "lint":
+        evidence = {"lint_command": command, "lint_result": result}
+        target_status = "green_verified"
+    else:
+        return {"ok": False, "error": f"unknown evidence gate: {gate}"}
     lock_id = f"stateful-dev-record-{datetime.now(UTC).strftime('%Y%m%dT%H%M%S%fZ')}"
     lock = None
     try:
@@ -211,6 +228,14 @@ def _record_evidence(
                 break
         if item is None:
             return {"ok": False, "error": f"item not found: {item_id}"}
+
+        for key, value in evidence.items():
+            if not value:
+                return {"ok": False, "error": f"{key} must not be empty"}
+        try:
+            require_evidence_result_semantics(target_status, evidence)
+        except IllegalTransitionError as exc:
+            return {"ok": False, "error": str(exc)}
 
         if "green" in gate or "full_suite" in gate:
             if not _has_red_evidence(item):
@@ -415,7 +440,6 @@ def stateful_dev_lock_recover(payload: dict[str, Any]) -> dict[str, Any]:
     )
 
     state_path = Path(payload["state"])
-    force = payload.get("force", False)
     lock_dir = state_path.parent / LOCK_DIR_NAME
 
     if not lock_dir.exists():
@@ -435,12 +459,12 @@ def stateful_dev_lock_recover(payload: dict[str, Any]) -> dict[str, Any]:
     else:
         is_stale = True
 
-    if not is_stale and not force:
+    if not is_stale:
         return {
             "ok": False,
             "error": (
                 "lock is not stale — refusing to recover. "
-                "Use force=true to override."
+                "Wait for the owner or perform manual recovery with operator approval."
             ),
         }
 
@@ -518,10 +542,15 @@ def stateful_dev_complete(payload: dict[str, Any]) -> dict[str, Any]:
         + counts.get("red_verified", 0)
         + counts.get("green_verified", 0)
     )
+    pending_count = counts.get("pending", 0)
     retryable_count = counts.get("failed_retryable", 0)
-    active_or_retryable_count = active_count + retryable_count
+    active_or_pending_or_retryable_count = (
+        active_count + pending_count + retryable_count
+    )
 
-    shutdown_approved = doctor_ok and lock_clear and active_or_retryable_count == 0
+    shutdown_approved = (
+        doctor_ok and lock_clear and active_or_pending_or_retryable_count == 0
+    )
 
     if not doctor_ok:
         next_action = "repair invalid state before considering shutdown"
@@ -529,6 +558,8 @@ def stateful_dev_complete(payload: dict[str, Any]) -> dict[str, Any]:
         next_action = "recover stale lock or wait for lock holder"
     elif active_count > 0:
         next_action = "resume or complete active item before shutdown"
+    elif pending_count > 0:
+        next_action = "claim or resolve pending items before shutdown"
     elif retryable_count > 0:
         next_action = "review failed_retryable items — retry or mark failed_final"
     else:
@@ -539,8 +570,10 @@ def stateful_dev_complete(payload: dict[str, Any]) -> dict[str, Any]:
         "doctor_ok": doctor_ok,
         "lock_clear": lock_clear,
         "active_count": active_count,
+        "pending_count": pending_count,
         "failed_retryable_count": retryable_count,
-        "active_or_retryable_count": active_or_retryable_count,
+        "active_or_retryable_count": active_count + retryable_count,
+        "active_or_pending_or_retryable_count": active_or_pending_or_retryable_count,
         "counts": counts,
         "next_action": next_action,
     }

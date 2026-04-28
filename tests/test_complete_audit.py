@@ -138,6 +138,29 @@ class TestCompleteShutdownDecision:
         assert payload["shutdown_approved"] is False
         assert payload["failed_retryable_count"] == 1
 
+    def test_complete_blocked_by_pending_item(self, tmp_path: Path) -> None:
+        """Pending work must block shutdown approval."""
+        state_path = tmp_path / "state.json"
+        _write_state(
+            state_path,
+            items=[
+                {"id": "T1", "title": "Done", "status": "succeeded"},
+                {"id": "T2", "title": "Pending", "status": "pending"},
+            ],
+            counts={
+                "succeeded": 1, "pending": 1, "in_progress": 0,
+                "red_verified": 0, "green_verified": 0, "needs_review": 0,
+                "blocked": 0, "failed_retryable": 0, "failed_final": 0, "skipped": 0,
+            },
+        )
+        runner = CliRunner()
+        result = runner.invoke(app, ["complete", "--state", str(state_path), "--json"])
+        assert result.exit_code == 0, f"Command failed: {result.output}"
+        payload = json.loads(result.stdout)
+        assert payload["shutdown_approved"] is False
+        assert payload["pending_count"] == 1
+        assert "pending" in payload["next_action"].lower()
+
     def test_complete_blocked_by_stale_lock(self, tmp_path: Path) -> None:
         """When a non-stale lock is held, shutdown is not approved."""
         state_path = tmp_path / "state.json"
