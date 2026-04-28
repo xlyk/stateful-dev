@@ -4,6 +4,12 @@ This is the quick mental model for how `stateful-dev`, Poseidon, Hermes cron, an
 
 For the detailed reference, see [`system-integration.md`](system-integration.md).
 
+Related repos:
+
+- [Poseidon](https://github.com/xlyk/poseidon) — remote HITL mailbox/control plane.
+- [Hermes plugins](https://github.com/xlyk/hermes-plugins) — plugin archive for reusable Hermes plugin code.
+- [`plugins/stateful-dev/`](../plugins/stateful-dev/) — the in-repo stateful-dev Hermes plugin source.
+
 ## The one-line model
 
 Hermes schedules the run. `stateful-dev` decides whether work is safe to claim. Poseidon carries operator decisions. The Hermes agent does the coding. The plugin gives the agent safe tools to update state.
