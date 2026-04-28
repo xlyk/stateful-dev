@@ -280,7 +280,13 @@ def test_plugin_record_lint_uses_cli_evidence_keys(tmp_path):
     }
 
 
-def test_plugin_lock_recover_does_not_offer_unsupported_force(tmp_path):
+def test_plugin_lock_recover_schema_does_not_offer_unsupported_force():
+    tools = load_plugin_tools()
+
+    assert "force" not in tools.LOCK_RECOVER_SCHEMA
+
+
+def test_plugin_lock_recover_does_not_force_recover_fresh_lock(tmp_path):
     state_path = tmp_path / "state.json"
     write_state(state_path)
     lock_dir = state_path.parent / "lock"
@@ -313,6 +319,69 @@ def test_plugin_claim_returns_claimed_item(tmp_path):
     assert result["item"]["id"] == "sample:T1"
     assert result["item"]["status"] == "in_progress"
     assert result["run_id"] == "test-run-001"
+
+
+def test_plugin_claim_prefers_failed_retryable_before_pending(tmp_path):
+    state_path = tmp_path / "state.json"
+    write_state(
+        state_path,
+        {
+            "job_name": "sample-worker",
+            "version": 1,
+            "project_root": str(tmp_path),
+            "plan_paths": ["docs/plans/sample.md"],
+            "counts": {
+                "pending": 1,
+                "in_progress": 0,
+                "red_verified": 0,
+                "green_verified": 0,
+                "succeeded": 0,
+                "needs_review": 0,
+                "blocked": 0,
+                "failed_retryable": 1,
+                "failed_final": 0,
+                "skipped": 0,
+            },
+            "items": [
+                {"id": "sample:T1", "title": "Pending", "status": "pending"},
+                {
+                    "id": "sample:T2",
+                    "title": "Retry",
+                    "status": "failed_retryable",
+                    "attempts": 1,
+                },
+            ],
+        },
+    )
+    tools = load_plugin_tools()
+
+    result = tools.stateful_dev_claim({"state": str(state_path), "run_id": "run-1"})
+
+    assert result["ok"] is True
+    assert result["item"]["id"] == "sample:T2"
+
+
+def test_plugin_claim_refuses_hitl_required_without_poll_marker(tmp_path):
+    state_path = tmp_path / "state.json"
+    write_state(state_path)
+    data = json.loads(state_path.read_text(encoding="utf-8"))
+    data["hitl"] = {
+        "enabled": True,
+        "provider": "poseidon",
+        "node_id": "test-node",
+        "worker_id": "sample-worker",
+        "state_path_hash": "sha256:abc123",
+        "poll_policy": "required",
+        "active_requests": [],
+    }
+    state_path.write_text(json.dumps(data), encoding="utf-8")
+    tools = load_plugin_tools()
+
+    result = tools.stateful_dev_claim({"state": str(state_path), "run_id": "run-1"})
+
+    assert result["ok"] is False
+    assert result["claimed"] is False
+    assert "hitl poll required" in result["error"].lower()
 
 
 def test_plugin_claim_returns_none_when_all_done(tmp_path):

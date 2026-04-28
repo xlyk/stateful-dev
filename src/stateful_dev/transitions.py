@@ -93,7 +93,34 @@ def _result_text(evidence: dict[str, Any] | None, field: str) -> str:
     return value if isinstance(value, str) else ""
 
 
-def _looks_successful(result: str) -> bool:
+def _exit_code(evidence: dict[str, Any] | None) -> int | None:
+    if not isinstance(evidence, dict):
+        return None
+    value = evidence.get("exit_code")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _passed_flag(evidence: dict[str, Any] | None) -> bool | None:
+    if not isinstance(evidence, dict):
+        return None
+    value = evidence.get("passed")
+    return value if isinstance(value, bool) else None
+
+
+def _looks_successful(result: str, evidence: dict[str, Any] | None = None) -> bool:
+    passed = _passed_flag(evidence)
+    if passed is not None:
+        return passed
+    exit_code = _exit_code(evidence)
+    if exit_code is not None:
+        return exit_code == 0
     lowered = result.lower()
     success_markers = (
         "exit 0",
@@ -107,8 +134,24 @@ def _looks_successful(result: str) -> bool:
     return any(marker in lowered for marker in success_markers)
 
 
-def _looks_failed(result: str) -> bool:
+def _looks_failed(result: str, evidence: dict[str, Any] | None = None) -> bool:
+    passed = _passed_flag(evidence)
+    if passed is not None:
+        return not passed
+    exit_code = _exit_code(evidence)
+    if exit_code is not None:
+        return exit_code != 0
     lowered = result.lower()
+    benign_phrases = (
+        "no error",
+        "no errors",
+        "no failure",
+        "no failures",
+        "without error",
+        "without errors",
+    )
+    for phrase in benign_phrases:
+        lowered = lowered.replace(phrase, "")
     failure_markers = (
         "exit 1",
         "exit 2",
@@ -135,7 +178,9 @@ def _require_result_semantics(
     if target_status in {"red_verified", "green_verified", "succeeded"}:
         for entry in red_entries:
             red_result = _result_text(entry, "focused_red_result")
-            if _looks_successful(red_result) and not _looks_failed(red_result):
+            if _looks_successful(red_result, entry) and not _looks_failed(
+                red_result, entry
+            ):
                 raise IllegalTransitionError(
                     "RED evidence result appears to be a success"
                 )
@@ -145,7 +190,7 @@ def _require_result_semantics(
     )
     if target_status in {"green_verified", "succeeded"}:
         for entry in green_entries:
-            if _looks_failed(_result_text(entry, "focused_green_result")):
+            if _looks_failed(_result_text(entry, "focused_green_result"), entry):
                 raise IllegalTransitionError(
                     "GREEN evidence result appears to be a failure"
                 )
@@ -155,7 +200,7 @@ def _require_result_semantics(
     )
     if target_status == "succeeded":
         for entry in full_suite_entries:
-            if _looks_failed(_result_text(entry, "full_suite_result")):
+            if _looks_failed(_result_text(entry, "full_suite_result"), entry):
                 raise IllegalTransitionError(
                     "full suite evidence result appears to be a failure"
                 )

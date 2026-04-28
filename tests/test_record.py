@@ -407,3 +407,81 @@ class TestRecordLint:
             ],
         )
         assert result.exit_code == 0
+
+
+
+def test_record_red_rejects_pending_item(tmp_path: Path):
+    state_path = _make_state(tmp_path, item_status="pending")
+
+    result = runner.invoke(
+        app,
+        [
+            "record-red",
+            "--state",
+            str(state_path),
+            "--item-id",
+            "plan:T1-test",
+            "--command",
+            RED_CMD,
+            "--result",
+            RED_RES,
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "requires item status in_progress" in result.output
+
+
+def test_record_green_rejects_in_progress_item_with_red_evidence(tmp_path: Path):
+    state_path = _make_state(tmp_path, item_status="in_progress")
+    data = json.loads(state_path.read_text(encoding="utf-8"))
+    data["items"][0]["evidence"] = [
+        {"focused_red_command": RED_CMD, "focused_red_result": RED_RES}
+    ]
+    state_path.write_text(json.dumps(data), encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "record-green",
+            "--state",
+            str(state_path),
+            "--item-id",
+            "plan:T1-test",
+            "--command",
+            GREEN_CMD,
+            "--result",
+            GREEN_RES,
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "requires item status red_verified" in result.output
+
+
+def test_record_full_suite_rejects_before_green_verified(tmp_path: Path):
+    state_path = _make_state(tmp_path, item_status="red_verified")
+    data = json.loads(state_path.read_text(encoding="utf-8"))
+    data["items"][0]["evidence"] = [
+        {"focused_red_command": RED_CMD, "focused_red_result": RED_RES},
+        {"focused_green_command": GREEN_CMD, "focused_green_result": GREEN_RES},
+    ]
+    state_path.write_text(json.dumps(data), encoding="utf-8")
+
+    result = runner.invoke(
+        app,
+        [
+            "record-full-suite",
+            "--state",
+            str(state_path),
+            "--item-id",
+            "plan:T1-test",
+            "--command",
+            FS_CMD,
+            "--result",
+            FS_RES,
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "requires item status green_verified" in result.output
