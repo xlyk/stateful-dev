@@ -170,6 +170,178 @@ Current Hermes behavior matters:
 
 Wrapper scripts must preserve nonzero `blocker`/`error` exits. Converting them into exit-0 skips makes operator-visible blockers silent.
 
+## Manual script-backed worker setup
+
+There is not yet an installer for wrapper scripts. Until `stateful-dev` grows a `worker install` or `profile apply` command, create the wrapper and Hermes cron job manually.
+
+Assume:
+
+```bash
+WORKER_ID=my-worker
+PROJECT_ROOT=/absolute/path/to/project
+STATE_PATH="$PROJECT_ROOT/.agent-state/$WORKER_ID/state.json"
+SCRIPT_PATH="$HOME/.hermes/scripts/stateful_dev_${WORKER_ID}_gate.py"
+```
+
+### 1. Create state from a plan
+
+Your plan must use `## Task N: Title` headings.
+
+```bash
+cd "$PROJECT_ROOT"
+uv run stateful-dev init \
+  --plan docs/plans/<plan>.md \
+  --state "$STATE_PATH" \
+  --job-name "$WORKER_ID" \
+  --project-root "$PROJECT_ROOT" \
+  --json
+uv run stateful-dev doctor --state "$STATE_PATH" --json
+```
+
+### 2. Create the Hermes cron gate wrapper
+
+The wrapper lives in `~/.hermes/scripts/`. It must stay a thin adapter: call `stateful-dev cron-gate`, emit the last JSON line, and preserve nonzero exits.
+
+```bash
+mkdir -p "$HOME/.hermes/scripts"
+cat > "$SCRIPT_PATH" <<'PY'
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+
+WORKER_ID = "my-worker"
+PROJECT_ROOT = Path("/absolute/path/to/project")
+STATE_PATH = PROJECT_ROOT / ".agent-state" / WORKER_ID / "state.json"
+
+
+def _run_id() -> str:
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def main() -> None:
+    run_id = _run_id()
+    print(f"[gate-wrapper] worker={WORKER_ID} run={run_id}", file=sys.stderr, flush=True)
+
+    result = subprocess.run(
+        [
+            "uv", "run", "--directory", str(PROJECT_ROOT),
+            "stateful-dev", "cron-gate",
+            "--state", str(STATE_PATH),
+            "--project-root", str(PROJECT_ROOT),
+            "--worker-id", WORKER_ID,
+            "--run-id", run_id,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    last_json = None
+    for line in reversed(result.stdout.splitlines()):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        last_json = stripped
+        break
+
+    if last_json:
+        print(last_json, flush=True)
+        if result.returncode != 0:
+            sys.exit(result.returncode)
+        return
+
+    if result.returncode != 0:
+        print(json.dumps({
+            "wakeAgent": False,
+            "mode": "error",
+            "worker_id": WORKER_ID,
+            "run_id": run_id,
+            "project_root": str(PROJECT_ROOT),
+            "state_path": str(STATE_PATH),
+            "item_id": None,
+            "item_title": None,
+            "item_status": None,
+            "blocker": f"wrapper exited {result.returncode} and produced no parseable JSON output",
+            "complete": False,
+            "message": "Internal error in gate wrapper script.",
+        }), flush=True)
+        sys.exit(result.returncode)
+
+    print(result.stdout.rstrip(), flush=True)
+
+
+if __name__ == "__main__":
+    main()
+PY
+chmod +x "$SCRIPT_PATH"
+```
+
+Replace `WORKER_ID`, `PROJECT_ROOT`, and `STATE_PATH` inside the generated script before using it.
+
+### 3. Smoke-test the wrapper
+
+The final stdout line must be JSON and include `wakeAgent`.
+
+```bash
+python "$SCRIPT_PATH" 2>/dev/null \
+  | python -c 'import json,sys; d=json.load(sys.stdin); assert "wakeAgent" in d; print(d["mode"], d["wakeAgent"])'
+```
+
+If this fails, do not create the cron job yet. Run the underlying command directly:
+
+```bash
+cd "$PROJECT_ROOT"
+uv run stateful-dev cron-gate \
+  --state "$STATE_PATH" \
+  --project-root "$PROJECT_ROOT" \
+  --worker-id "$WORKER_ID" \
+  --run-id "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --json
+```
+
+### 4. Register the Hermes cron job
+
+Use Hermes' `cronjob` tool/API and set `script` to the wrapper filename, not the absolute path.
+
+```python
+cronjob(action="create",
+    name="my-worker",
+    schedule="every 5m",
+    prompt="You are a stateful-dev cron coding worker. Process the item provided in Script Output using the stateful-dev-lean-worker protocol.",
+    skills=["stateful-dev-lean-worker"],
+    script="stateful_dev_my-worker_gate.py",
+    workdir="/absolute/path/to/project",
+    enabled_toolsets=["terminal", "file", "skills"],
+    deliver="discord:#notifications")
+```
+
+Recommended defaults:
+
+- one worker per repo/worktree/state file;
+- lean prompt plus `stateful-dev-lean-worker` skill;
+- `terminal,file,skills` toolsets unless the plan needs more;
+- Discord notifications for blockers/completion, not routine idle skips.
+
+### 5. Verify after registration
+
+```bash
+uv run stateful-dev doctor --state "$STATE_PATH" --json
+uv run stateful-dev status --state "$STATE_PATH" --json
+python "$SCRIPT_PATH" 2>/dev/null \
+  | python -c 'import json,sys; print(json.load(sys.stdin)["mode"])'
+```
+
+Then list Hermes cron jobs and confirm the job has the expected `script`, `workdir`, skill, and toolsets.
+
 ## Hermes plugin
 
 The plugin lives at [`plugins/stateful-dev`](plugins/stateful-dev). It exposes thin Hermes tool wrappers around tested library behavior.

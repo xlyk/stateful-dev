@@ -124,6 +124,25 @@ def test_cron_gate_runbook_exists_and_has_required_sections() -> None:
     assert missing == [], f"runbook missing required sections: {missing}"
 
 
+def test_readme_documents_manual_script_backed_worker_setup() -> None:
+    readme = (ROOT / "README.md").read_text()
+
+    required_snippets = [
+        "## Manual script-backed worker setup",
+        "WORKER_ID=my-worker",
+        "SCRIPT_PATH=\"$HOME/.hermes/scripts/stateful_dev_${WORKER_ID}_gate.py\"",
+        "cat > \"$SCRIPT_PATH\" <<'PY'",
+        "chmod +x \"$SCRIPT_PATH\"",
+        "cronjob(action=\"create\"",
+        "script=\"stateful_dev_my-worker_gate.py\"",
+        "stateful-dev cron-gate",
+        "wakeAgent",
+    ]
+
+    missing = [snippet for snippet in required_snippets if snippet not in readme]
+    assert missing == [], f"README missing manual setup snippets: {missing}"
+
+
 def test_usage_docs_include_install_and_smoke_commands() -> None:
     usage = (ROOT / "docs" / "usage.md").read_text()
     readme = (ROOT / "README.md").read_text()
