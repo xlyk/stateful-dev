@@ -287,3 +287,37 @@ class TestProfileValidateWarnings:
         assert payload.get("valid") is True
         warnings = payload.get("warnings", [])
         assert any("cron_permissions" in str(w).lower() for w in warnings)
+
+
+class TestProfileRenderValidation:
+    def test_render_reuses_full_profile_validation(self, tmp_path: Path) -> None:
+        """Render must reject profiles missing validate-required fields."""
+        profile_path = tmp_path / "deployment_profile.json"
+        _write_profile(profile_path, {
+            "version": 1,
+            "project_root": str(tmp_path),
+            "executor_prompt_template": "Work on {item_id}: {item_title}",
+        })
+
+        result = runner.invoke(
+            app,
+            [
+                "profile",
+                "render",
+                "--profile",
+                str(profile_path),
+                "--item-id",
+                "sample:T1",
+                "--item-title",
+                "Sample task",
+                "--item-status",
+                "pending",
+                "--json",
+            ],
+        )
+
+        assert result.exit_code == 1
+        payload = json.loads(result.stdout)
+        assert payload["valid"] is False
+        assert any("plan_paths" in error for error in payload["errors"])
+        assert any("gates" in error for error in payload["errors"])

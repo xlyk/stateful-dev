@@ -211,6 +211,93 @@ def test_plugin_record_green_requires_red(tmp_path):
     assert "RED evidence" in result["error"]
 
 
+def test_plugin_record_full_suite_uses_cli_evidence_keys(tmp_path):
+    state_path = tmp_path / "state.json"
+    write_state(state_path, {
+        "job_name": "sample-worker",
+        "version": 1,
+        "project_root": str(tmp_path),
+        "plan_paths": ["docs/plans/sample.md"],
+        "counts": {"pending": 0, "in_progress": 0, "red_verified": 0, "green_verified": 1, "succeeded": 0, "needs_review": 0, "blocked": 0, "failed_retryable": 0, "failed_final": 0, "skipped": 0},
+        "items": [
+            {
+                "id": "sample:T1",
+                "title": "Sample task",
+                "status": "green_verified",
+                "attempts": 1,
+                "max_attempts": 3,
+                "red_verified": True,
+                "green_verified": True,
+                "full_suite_verified": False,
+                "files_touched": [],
+                "test_commands": [],
+                "commit_sha": None,
+                "needs_operator": False,
+                "result": None,
+                "evidence": [
+                    {"focused_red_command": "pytest red", "focused_red_result": "exit 1"},
+                    {"focused_green_command": "pytest green", "focused_green_result": "exit 0"},
+                ],
+            }
+        ],
+    })
+    tools = load_plugin_tools()
+
+    result = tools.stateful_dev_record_full_suite({
+        "state": str(state_path),
+        "item_id": "sample:T1",
+        "command": "pytest -q",
+        "result": "exit 0; passed",
+    })
+
+    assert result["ok"] is True
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    evidence = saved["items"][0]["evidence"][-1]
+    assert evidence == {
+        "full_suite_command": "pytest -q",
+        "full_suite_result": "exit 0; passed",
+    }
+
+
+def test_plugin_record_lint_uses_cli_evidence_keys(tmp_path):
+    state_path = tmp_path / "state.json"
+    write_state(state_path)
+    tools = load_plugin_tools()
+
+    result = tools.stateful_dev_record_lint({
+        "state": str(state_path),
+        "item_id": "sample:T1",
+        "command": "ruff check .",
+        "result": "exit 0; All checks passed",
+    })
+
+    assert result["ok"] is True
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    evidence = saved["items"][0]["evidence"][-1]
+    assert evidence == {
+        "lint_command": "ruff check .",
+        "lint_result": "exit 0; All checks passed",
+    }
+
+
+def test_plugin_lock_recover_does_not_offer_unsupported_force(tmp_path):
+    state_path = tmp_path / "state.json"
+    write_state(state_path)
+    lock_dir = state_path.parent / "lock"
+    lock_dir.mkdir()
+    lock_dir.joinpath("metadata.json").write_text(
+        json.dumps({"run_id": "fresh", "acquired_at": "2999-01-01T00:00:00+00:00"}),
+        encoding="utf-8",
+    )
+    tools = load_plugin_tools()
+
+    result = tools.stateful_dev_lock_recover({"state": str(state_path), "force": True})
+
+    assert result["ok"] is False
+    assert "force" not in result["error"].lower()
+    assert lock_dir.exists()
+
+
 def test_plugin_claim_returns_claimed_item(tmp_path):
     state_path = tmp_path / "state.json"
     write_state(state_path)

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from typer.testing import CliRunner
 
-from stateful_dev.cli import app
+from stateful_dev.cli import _claim_one_item, app
 from stateful_dev.locking import acquire_lock, release_lock
 
 
@@ -180,6 +180,28 @@ def test_claim_returns_null_when_no_eligible_items(tmp_path: Path) -> None:
     payload = json.loads(result.stdout)
     assert payload["claimed"] is False
     assert payload["item"] is None
+
+
+def test_claim_reloads_state_under_lock_before_selecting_item(tmp_path: Path) -> None:
+    """A stale caller snapshot must not overwrite newer state during claim."""
+    state_path = tmp_path / "state.json"
+    _write_state(
+        state_path,
+        [{"id": "plan:T1-claim", "title": "Claim", "status": "pending"}],
+    )
+    stale_snapshot = json.loads(state_path.read_text(encoding="utf-8"))
+
+    _write_state(
+        state_path,
+        [{"id": "plan:T1-claim", "title": "Claim", "status": "succeeded"}],
+    )
+
+    chosen, updated = _claim_one_item(stale_snapshot, state_path, "cron-run-abc")
+
+    assert chosen is None
+    assert updated["items"][0]["status"] == "succeeded"
+    saved = json.loads(state_path.read_text(encoding="utf-8"))
+    assert saved["items"][0]["status"] == "succeeded"
 
 
 def test_claim_invalid_state_exits_nonzero(tmp_path: Path) -> None:

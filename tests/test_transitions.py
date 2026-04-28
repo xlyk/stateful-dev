@@ -5,27 +5,57 @@ from stateful_dev.transitions import IllegalTransitionError, transition_item
 FOCUSED_TRANSITION_COMMAND = "uv run pytest tests/test_transitions.py -q"
 
 
-def test_pending_cannot_jump_to_succeeded():
-    state = {
-        "items": [
-            {
-                "id": "plan:T1-one",
-                "status": "pending",
-            }
-        ],
-        "counts": {
-            "pending": 1,
-            "in_progress": 0,
-            "red_verified": 0,
-            "green_verified": 0,
-            "succeeded": 0,
-            "failed_retryable": 0,
-            "failed_final": 0,
-            "needs_review": 0,
-            "blocked": 0,
-            "skipped": 0,
-        },
+def _counts(status: str) -> dict[str, int]:
+    statuses = [
+        "pending",
+        "in_progress",
+        "red_verified",
+        "green_verified",
+        "succeeded",
+        "failed_retryable",
+        "failed_final",
+        "needs_review",
+        "blocked",
+        "skipped",
+    ]
+    counts = {key: 0 for key in statuses}
+    counts[status] = 1
+    return counts
+
+
+def _state(status: str, evidence: list[dict] | None = None) -> dict:
+    item = {
+        "id": "plan:T1-one",
+        "status": status,
     }
+    if evidence is not None:
+        item["evidence"] = evidence
+    return {"items": [item], "counts": _counts(status)}
+
+
+def _red_evidence(result: str = "exit 1; AssertionError") -> dict:
+    return {
+        "focused_red_command": FOCUSED_TRANSITION_COMMAND,
+        "focused_red_result": result,
+    }
+
+
+def _green_evidence(result: str = "exit 0; 1 passed") -> dict:
+    return {
+        "focused_green_command": FOCUSED_TRANSITION_COMMAND,
+        "focused_green_result": result,
+    }
+
+
+def _full_suite_evidence(result: str = "exit 0; all tests passed") -> dict:
+    return {
+        "full_suite_command": "uv run pytest -q",
+        "full_suite_result": result,
+    }
+
+
+def test_pending_cannot_jump_to_succeeded():
+    state = _state("pending")
 
     with pytest.raises(IllegalTransitionError, match="pending -> succeeded"):
         transition_item(state, "plan:T1-one", "succeeded")
@@ -34,26 +64,7 @@ def test_pending_cannot_jump_to_succeeded():
 
 
 def test_green_requires_red_evidence():
-    state = {
-        "items": [
-            {
-                "id": "plan:T1-one",
-                "status": "red_verified",
-            }
-        ],
-        "counts": {
-            "pending": 0,
-            "in_progress": 0,
-            "red_verified": 1,
-            "green_verified": 0,
-            "succeeded": 0,
-            "failed_retryable": 0,
-            "failed_final": 0,
-            "needs_review": 0,
-            "blocked": 0,
-            "skipped": 0,
-        },
-    }
+    state = _state("red_verified")
 
     with pytest.raises(
         IllegalTransitionError,
@@ -63,36 +74,43 @@ def test_green_requires_red_evidence():
             state,
             "plan:T1-one",
             "green_verified",
-            evidence={
-                "focused_green_command": FOCUSED_TRANSITION_COMMAND,
-                "focused_green_result": "1 passed",
-            },
+            evidence=_green_evidence(),
         )
 
     assert state["items"][0]["status"] == "red_verified"
 
 
+def test_red_transition_accepts_previously_recorded_red_evidence():
+    state = _state("in_progress", evidence=[_red_evidence()])
+
+    updated = transition_item(state, "plan:T1-one", "red_verified")
+
+    assert updated["items"][0]["status"] == "red_verified"
+    assert updated["items"][0]["red_verified"] is True
+
+
+def test_green_requires_focused_green_evidence():
+    state = _state("red_verified", evidence=[_red_evidence()])
+
+    with pytest.raises(
+        IllegalTransitionError,
+        match="green_verified requires focused GREEN evidence",
+    ):
+        transition_item(state, "plan:T1-one", "green_verified")
+
+
+def test_green_rejects_recorded_failed_green_evidence():
+    state = _state("red_verified", evidence=[_red_evidence(), _green_evidence("exit 1; failed")])
+
+    with pytest.raises(
+        IllegalTransitionError,
+        match="GREEN evidence result appears to be a failure",
+    ):
+        transition_item(state, "plan:T1-one", "green_verified")
+
+
 def test_red_evidence_rejects_obvious_success_result():
-    state = {
-        "items": [
-            {
-                "id": "plan:T1-one",
-                "status": "in_progress",
-            }
-        ],
-        "counts": {
-            "pending": 0,
-            "in_progress": 1,
-            "red_verified": 0,
-            "green_verified": 0,
-            "succeeded": 0,
-            "failed_retryable": 0,
-            "failed_final": 0,
-            "needs_review": 0,
-            "blocked": 0,
-            "skipped": 0,
-        },
-    }
+    state = _state("in_progress")
 
     with pytest.raises(
         IllegalTransitionError,
@@ -102,40 +120,12 @@ def test_red_evidence_rejects_obvious_success_result():
             state,
             "plan:T1-one",
             "red_verified",
-            evidence={
-                "focused_red_command": FOCUSED_TRANSITION_COMMAND,
-                "focused_red_result": "exit 0; 1 passed",
-            },
+            evidence=_red_evidence("exit 0; 1 passed"),
         )
 
 
 def test_green_evidence_rejects_obvious_failure_result():
-    state = {
-        "items": [
-            {
-                "id": "plan:T1-one",
-                "status": "red_verified",
-                "evidence": [
-                    {
-                        "focused_red_command": FOCUSED_TRANSITION_COMMAND,
-                        "focused_red_result": "exit 1; AssertionError",
-                    }
-                ],
-            }
-        ],
-        "counts": {
-            "pending": 0,
-            "in_progress": 0,
-            "red_verified": 1,
-            "green_verified": 0,
-            "succeeded": 0,
-            "failed_retryable": 0,
-            "failed_final": 0,
-            "needs_review": 0,
-            "blocked": 0,
-            "skipped": 0,
-        },
-    }
+    state = _state("red_verified", evidence=[_red_evidence()])
 
     with pytest.raises(
         IllegalTransitionError,
@@ -145,44 +135,12 @@ def test_green_evidence_rejects_obvious_failure_result():
             state,
             "plan:T1-one",
             "green_verified",
-            evidence={
-                "focused_green_command": FOCUSED_TRANSITION_COMMAND,
-                "focused_green_result": "exit 1; failed",
-            },
+            evidence=_green_evidence("exit 1; failed"),
         )
 
 
 def test_full_suite_evidence_rejects_obvious_failure_result():
-    state = {
-        "items": [
-            {
-                "id": "plan:T1-one",
-                "status": "green_verified",
-                "evidence": [
-                    {
-                        "focused_red_command": FOCUSED_TRANSITION_COMMAND,
-                        "focused_red_result": "exit 1; AssertionError",
-                    },
-                    {
-                        "focused_green_command": FOCUSED_TRANSITION_COMMAND,
-                        "focused_green_result": "exit 0; 1 passed",
-                    },
-                ],
-            }
-        ],
-        "counts": {
-            "pending": 0,
-            "in_progress": 0,
-            "red_verified": 0,
-            "green_verified": 1,
-            "succeeded": 0,
-            "failed_retryable": 0,
-            "failed_final": 0,
-            "needs_review": 0,
-            "blocked": 0,
-            "skipped": 0,
-        },
-    }
+    state = _state("green_verified", evidence=[_red_evidence(), _green_evidence()])
 
     with pytest.raises(
         IllegalTransitionError,
@@ -192,8 +150,22 @@ def test_full_suite_evidence_rejects_obvious_failure_result():
             state,
             "plan:T1-one",
             "succeeded",
-            evidence={
-                "full_suite_command": "uv run pytest -q",
-                "full_suite_result": "exit 2; 3 failed",
-            },
+            evidence=_full_suite_evidence("exit 2; 3 failed"),
         )
+
+
+def test_succeeded_rejects_recorded_failed_full_suite_evidence():
+    state = _state(
+        "green_verified",
+        evidence=[
+            _red_evidence(),
+            _green_evidence(),
+            _full_suite_evidence("exit 2; 3 failed"),
+        ],
+    )
+
+    with pytest.raises(
+        IllegalTransitionError,
+        match="full suite evidence result appears to be a failure",
+    ):
+        transition_item(state, "plan:T1-one", "succeeded")

@@ -375,7 +375,11 @@ def _record_evidence(
         evidence: evidence dict with command and result fields
         as_json: whether to emit JSON output
     """
-    from stateful_dev.transitions import _has_red_evidence
+    from stateful_dev.transitions import (
+        IllegalTransitionError,
+        _has_red_evidence,
+        require_evidence_result_semantics,
+    )
 
     lock = None
     try:
@@ -393,12 +397,24 @@ def _record_evidence(
             raise typer.Exit(1)
 
         # Basic sanity checks on the evidence
-        if "command" in evidence and not evidence["command"]:
-            typer.echo("command must not be empty", err=True)
-            raise typer.Exit(1)
-        if "result" in evidence and not evidence["result"]:
-            typer.echo("result must not be empty", err=True)
-            raise typer.Exit(1)
+        for key, value in evidence.items():
+            if not value:
+                typer.echo(f"{key} must not be empty", err=True)
+                raise typer.Exit(1)
+
+        if "focused_red_command" in evidence:
+            target_status = "red_verified"
+        elif "focused_green_command" in evidence:
+            target_status = "green_verified"
+        elif "full_suite_command" in evidence:
+            target_status = "succeeded"
+        else:
+            target_status = "green_verified"
+        try:
+            require_evidence_result_semantics(target_status, evidence)
+        except IllegalTransitionError as error:
+            typer.echo(str(error), err=True)
+            raise typer.Exit(1) from error
 
         # Gate-specific requirements
         if "focused_green_command" in evidence or "full_suite_command" in evidence:
@@ -463,22 +479,25 @@ def _claim_one_item(
     from stateful_dev.state import validate_state
     from stateful_dev.status import ACTIVE_STATUSES, ELIGIBLE_STATUSES
 
-    data["state_path"] = str(state)
-    validation = validate_state(data)
-    if not validation.ok:
-        raise ValueError("invalid state: " + "; ".join(validation.errors))
-
-    # HITL enforcement: fail closed when HITL is required but no successful poll
-    if hitl_enabled(data):
-        hitl_ok, hitl_reason = hitl_poll_ok_for_run(data, run_id)
-        if not hitl_ok:
-            raise ValueError("hitl poll required: " + hitl_reason)
-
     lock = None
     try:
         lock = acquire_lock(
             state.parent, _lock_run_id("claim"), timeout_minutes=_APP_LOCK_TIMEOUT
         )
+
+        # Re-read under lock so claim selection is based on the current durable
+        # state, not a stale caller snapshot loaded before lock acquisition.
+        data = _load_json(state)
+        data["state_path"] = str(state)
+        validation = validate_state(data)
+        if not validation.ok:
+            raise ValueError("invalid state: " + "; ".join(validation.errors))
+
+        # HITL enforcement: fail closed when HITL is required but no successful poll
+        if hitl_enabled(data):
+            hitl_ok, hitl_reason = hitl_poll_ok_for_run(data, run_id)
+            if not hitl_ok:
+                raise ValueError("hitl poll required: " + hitl_reason)
 
         items = data.get("items", [])
         active = next(
@@ -879,13 +898,16 @@ def complete(
         + counts.get("red_verified", 0)
         + counts.get("green_verified", 0)
     )
+    pending_count = counts.get("pending", 0)
     retryable_count = counts.get("failed_retryable", 0)
-    active_or_retryable_count = active_count + retryable_count
+    active_or_pending_or_retryable_count = (
+        active_count + pending_count + retryable_count
+    )
 
     shutdown_approved = (
         doctor_ok
         and lock_clear
-        and active_or_retryable_count == 0
+        and active_or_pending_or_retryable_count == 0
     )
 
     # Build next action
@@ -895,6 +917,8 @@ def complete(
         next_action = "recover stale lock or wait for lock holder"
     elif active_count > 0:
         next_action = "resume or complete active item before shutdown"
+    elif pending_count > 0:
+        next_action = "claim or resolve pending items before shutdown"
     elif retryable_count > 0:
         next_action = "review failed_retryable items — retry or mark failed_final"
     else:
@@ -905,8 +929,10 @@ def complete(
         "doctor_ok": doctor_ok,
         "lock_clear": lock_clear,
         "active_count": active_count,
+        "pending_count": pending_count,
         "failed_retryable_count": retryable_count,
-        "active_or_retryable_count": active_or_retryable_count,
+        "active_or_retryable_count": active_count + retryable_count,
+        "active_or_pending_or_retryable_count": active_or_pending_or_retryable_count,
         "counts": counts,
         "next_action": next_action,
     }
@@ -919,6 +945,7 @@ def complete(
             f"doctor_ok: {doctor_ok}",
             f"lock_clear: {lock_clear}",
             f"active_count: {active_count}",
+            f"pending_count: {pending_count}",
             f"failed_retryable_count: {retryable_count}",
             f"next_action: {next_action}",
         ]
@@ -1038,6 +1065,7 @@ def hitl_poll_before_run(
     node_id = hitl.get("node_id", "")
     worker_id = hitl.get("worker_id", "")
     state_path_hash = hitl.get("state_path_hash") or compute_state_path_hash(str(state))
+    poll_required = hitl.get("poll_policy", "required") == "required"
     active_requests = hitl.get("active_requests", [])
     active_request_ids = [
         r.get("request_id") for r in active_requests
@@ -1084,7 +1112,7 @@ def hitl_poll_before_run(
         marker = {
             "run_id": run_id,
             "hitl_poll": {
-                "required": True,
+                "required": poll_required,
                 "ok": result.ok,
                 "completed_at": datetime.now(UTC).isoformat(),
                 "worker_id": worker_id,
@@ -1108,6 +1136,9 @@ def hitl_poll_before_run(
                 typer.echo(f"HITL poll ok: {staged_count} event(s) staged")
             else:
                 typer.echo(f"HITL poll failed: {result.error}")
+
+        if poll_required and not result.ok:
+            raise typer.Exit(1)
 
     except (FreshLockError, LockError) as error:
         _exit_lock_error(error)
@@ -1729,14 +1760,7 @@ def profile_render(
             typer.echo(f"invalid JSON: {exc.msg}")
         raise typer.Exit(1) from exc
 
-    errors: list[str] = []
-    warnings: list[str] = []
-
-    # Validate required profile fields
-    if "project_root" not in data:
-        errors.append("missing required field: project_root")
-    elif not isinstance(data["project_root"], str):
-        errors.append("project_root must be a string")
+    errors, warnings = _validate_deployment_profile(data)
 
     if "executor_prompt_template" not in data:
         errors.append(
