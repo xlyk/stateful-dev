@@ -2,6 +2,8 @@
 
 This document explains how the local `stateful-dev` helper, the Poseidon HITL mailbox, Hermes cron, and the `stateful-dev` Hermes plugin fit together.
 
+If you only need the mental model, start with [`system-integration-lite.md`](system-integration-lite.md).
+
 ## Short version
 
 `stateful-dev` is the local source of truth for worker execution. Poseidon is a remote mailbox for operator decisions. Hermes cron schedules fresh agent runs. Hermes plugin tools expose the same checked state operations to agents without making the plugin a second state machine.
