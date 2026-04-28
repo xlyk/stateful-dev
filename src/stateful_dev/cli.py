@@ -404,12 +404,33 @@ def _record_evidence(
 
         if "focused_red_command" in evidence:
             target_status = "red_verified"
+            allowed_statuses = {"in_progress"}
         elif "focused_green_command" in evidence:
             target_status = "green_verified"
+            allowed_statuses = {"red_verified"}
         elif "full_suite_command" in evidence:
             target_status = "succeeded"
+            allowed_statuses = {"green_verified"}
         else:
             target_status = "green_verified"
+            allowed_statuses = set(VALID_STATUSES)
+
+        if "focused_green_command" in evidence or "full_suite_command" in evidence:
+            if not _has_red_evidence(item):
+                typer.echo(
+                    "RED evidence must be recorded before GREEN or full-suite evidence",
+                    err=True,
+                )
+                raise typer.Exit(1)
+
+        current_status = item.get("status")
+        if current_status not in allowed_statuses:
+            expected = " or ".join(sorted(allowed_statuses))
+            typer.echo(
+                f"{list(evidence.keys())} evidence requires item status {expected}",
+                err=True,
+            )
+            raise typer.Exit(1)
         try:
             require_evidence_result_semantics(target_status, evidence)
         except IllegalTransitionError as error:
@@ -633,6 +654,7 @@ def cron_gate(
 
     # 2. Git status check
     git_dirty = False
+    git_failed = False
     git_reason = ""
     try:
         result = subprocess.run(
@@ -645,9 +667,9 @@ def cron_gate(
         if result.stdout.strip():
             git_dirty = True
             git_reason = result.stdout.strip()
-    except (OSError, subprocess.TimeoutExpired):
-        # git unavailable — not a blocker, just skip
-        pass
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        git_failed = True
+        git_reason = str(exc) or exc.__class__.__name__
 
     # 3. Lock check
     lock_path = state.parent / LOCK_DIR_NAME
@@ -732,6 +754,15 @@ def cron_gate(
             message="Lock is held. Wait for lock holder or recover stale lock.",
             complete=False,
         )
+    elif git_failed:
+        blocker_msg = f"git status failed: {git_reason}"
+        payload = _build_payload(
+            "blocker",
+            wake_agent=False,
+            blocker=blocker_msg,
+            message="Git status check failed. Fix git before running.",
+            complete=False,
+        )
     elif git_dirty:
         blocker_msg = f"uncommitted changes in project root: {git_reason}"
         payload = _build_payload(
@@ -750,17 +781,30 @@ def cron_gate(
             complete=True,
         )
     elif status_payload.get("active_item"):
-        item = status_payload["active_item"]
-        iid, ititle, istatus = _item_fields(item)
-        payload = _build_payload(
-            "wake",
-            wake_agent=True,
-            item_id=iid,
-            item_title=ititle,
-            item_status=istatus,
-            complete=False,
-            message=f"Continuing {iid} ({istatus})",
-        )
+        try:
+            claimed_item, data = _claim_one_item(data, state, run_id)
+        except (FreshLockError, LockError) as error:
+            _exit_lock_error(error)
+        except ValueError as exc:
+            blocker_msg = str(exc)
+            payload = _build_payload(
+                "blocker",
+                wake_agent=False,
+                blocker=blocker_msg,
+                message="Preflight failed before resuming active item.",
+                complete=False,
+            )
+        else:
+            iid, ititle, istatus = _item_fields(claimed_item)
+            payload = _build_payload(
+                "wake",
+                wake_agent=True,
+                item_id=iid,
+                item_title=ititle,
+                item_status=istatus,
+                complete=False,
+                message=f"Continuing {iid} ({istatus})",
+            )
     else:
         # No active item but work exists — claim one via the shared primitive
         try:

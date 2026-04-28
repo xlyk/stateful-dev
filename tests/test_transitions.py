@@ -169,3 +169,46 @@ def test_succeeded_rejects_recorded_failed_full_suite_evidence():
         match="full suite evidence result appears to be a failure",
     ):
         transition_item(state, "plan:T1-one", "succeeded")
+
+
+
+def test_green_result_with_no_errors_is_not_treated_as_failure():
+    state = _state(
+        "red_verified",
+        evidence=[
+            {"focused_red_command": "pytest red", "focused_red_result": "exit 1"},
+        ],
+    )
+
+    updated = transition_item(
+        state,
+        "plan:T1-one",
+        "green_verified",
+        {
+            "focused_green_command": "pytest green",
+            "focused_green_result": "exit 0; passed; no errors",
+        },
+    )
+
+    assert updated["items"][0]["status"] == "green_verified"
+
+
+def test_structured_exit_code_overrides_ambiguous_success_text():
+    state = _state(
+        "red_verified",
+        evidence=[
+            {"focused_red_command": "pytest red", "focused_red_result": "exit 1"},
+        ],
+    )
+
+    with pytest.raises(IllegalTransitionError):
+        transition_item(
+            state,
+            "plan:T1-one",
+            "green_verified",
+            {
+                "focused_green_command": "pytest green",
+                "focused_green_result": "exit 0; passed before cleanup failure",
+                "exit_code": 1,
+            },
+        )

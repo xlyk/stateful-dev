@@ -58,6 +58,41 @@ def _write_state(
     )
 
 
+def _write_hitl_state(
+    path: Path, items: list[dict], *, run_id: str | None = None
+) -> None:
+    _write_state(path, items, job_name="hitl-worker")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["hitl"] = {
+        "enabled": True,
+        "provider": "poseidon",
+        "node_id": "test-node",
+        "worker_id": "hitl-worker",
+        "state_path_hash": "sha256:abc123",
+        "poll_policy": "required",
+        "active_requests": [],
+    }
+    path.write_text(json.dumps(data), encoding="utf-8")
+    if run_id is not None:
+        runs_dir = path.parent / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        (runs_dir / f"{run_id}.json").write_text(
+            json.dumps(
+                {
+                    "run_id": run_id,
+                    "hitl_poll": {
+                        "required": True,
+                        "ok": True,
+                        "completed_at": "2026-04-27T10:00:00Z",
+                        "worker_id": "hitl-worker",
+                        "request_ids": [],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+
 def _git_status_head(state_dir: Path) -> str:
     """Return subprocess output for git status in given directory."""
     result = subprocess.run(
@@ -183,6 +218,56 @@ class TestCronGateActiveItem:
         assert payload["mode"] == "wake"
         assert payload["item_id"] == "plan:T1"
         assert payload["item_status"] == "red_verified"
+
+    def test_active_hitl_item_requires_poll_marker(self, tmp_path: Path) -> None:
+        state_path = tmp_path / "state.json"
+        _write_hitl_state(
+            state_path,
+            [{"id": "plan:T1", "title": "Active", "status": "in_progress"}],
+        )
+
+        result = CliRunner().invoke(
+            app,
+            [
+                "cron-gate",
+                "--state", str(state_path),
+                "--project-root", str(tmp_path),
+                "--worker-id", "hitl-worker",
+                "--run-id", "run-missing-poll",
+                "--json",
+            ],
+        )
+
+        assert result.exit_code == 1
+        payload = json.loads(result.stdout)
+        assert payload["mode"] == "blocker"
+        assert payload["wakeAgent"] is False
+        assert "hitl poll required" in payload["blocker"].lower()
+
+    def test_active_hitl_item_wakes_after_poll_marker(self, tmp_path: Path) -> None:
+        state_path = tmp_path / "state.json"
+        _write_hitl_state(
+            state_path,
+            [{"id": "plan:T1", "title": "Active", "status": "in_progress"}],
+            run_id="run-polled",
+        )
+
+        result = CliRunner().invoke(
+            app,
+            [
+                "cron-gate",
+                "--state", str(state_path),
+                "--project-root", str(tmp_path),
+                "--worker-id", "hitl-worker",
+                "--run-id", "run-polled",
+                "--json",
+            ],
+        )
+
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert payload["mode"] == "wake"
+        assert payload["item_id"] == "plan:T1"
 
 
 class TestCronGateEligibleItem:
@@ -316,6 +401,34 @@ class TestCronGateBlocker:
             assert "git" in blk or "dirty" in blk
         finally:
             dirty_file.unlink(missing_ok=True)
+
+    def test_blocker_when_git_status_fails(self, tmp_path: Path, monkeypatch) -> None:
+        state_path = tmp_path / "state.json"
+        _write_state(
+            state_path,
+            [{"id": "plan:T1", "title": "Work", "status": "pending"}],
+        )
+
+        def fail_git(*args, **kwargs):  # noqa: ARG001
+            raise subprocess.TimeoutExpired(["git", "status"], timeout=10)
+
+        monkeypatch.setattr(subprocess, "run", fail_git)
+        result = CliRunner().invoke(
+            app,
+            [
+                "cron-gate",
+                "--state", str(state_path),
+                "--project-root", str(tmp_path),
+                "--worker-id", "test-worker",
+                "--run-id", "run-abc",
+                "--json",
+            ],
+        )
+
+        assert result.exit_code == 1
+        payload = json.loads(result.stdout)
+        assert payload["mode"] == "blocker"
+        assert "git status failed" in payload["blocker"].lower()
 
 
 class TestCronGateBlockerNonZeroExit:

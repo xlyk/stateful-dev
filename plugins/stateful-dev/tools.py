@@ -42,7 +42,7 @@ RECORD_LINT_SCHEMA = {
 }
 CLAIM_SCHEMA = {"state": "path", "run_id": "string"}
 LOCK_STATUS_SCHEMA = {"state": "path"}
-LOCK_RECOVER_SCHEMA = {"state": "path", "force": "boolean"}
+LOCK_RECOVER_SCHEMA = {"state": "path"}
 HANDOFF_SCHEMA = {
     "job_name": "string",
     "question": "string",
@@ -232,6 +232,45 @@ def _record_evidence(
         for key, value in evidence.items():
             if not value:
                 return {"ok": False, "error": f"{key} must not be empty"}
+
+        if gate == "red":
+            allowed_statuses = {"in_progress"}
+        elif gate == "green":
+            allowed_statuses = {"red_verified"}
+        elif gate == "full_suite":
+            allowed_statuses = {"green_verified"}
+        else:
+            allowed_statuses = {
+                "pending",
+                "in_progress",
+                "red_verified",
+                "green_verified",
+                "succeeded",
+                "needs_review",
+                "blocked",
+                "failed_retryable",
+                "failed_final",
+                "skipped",
+            }
+
+        if "green" in gate or "full_suite" in gate:
+            if not _has_red_evidence(item):
+                return {
+                    "ok": False,
+                    "error": (
+                        "RED evidence must be recorded before "
+                        "GREEN or full-suite evidence"
+                    ),
+                }
+
+        current_status = item.get("status")
+        if current_status not in allowed_statuses:
+            expected = " or ".join(sorted(allowed_statuses))
+            return {
+                "ok": False,
+                "error": f"{gate} evidence requires item status {expected}",
+            }
+
         try:
             require_evidence_result_semantics(target_status, evidence)
         except IllegalTransitionError as exc:
@@ -318,76 +357,20 @@ def stateful_dev_record_lint(payload: dict[str, Any]) -> dict[str, Any]:
 
 def stateful_dev_claim(payload: dict[str, Any]) -> dict[str, Any]:
     """Atomically claim one eligible item or return an existing active item."""
-    from datetime import UTC, datetime
-
-    from stateful_dev.locking import (
-        FreshLockError,
-        LockError,
-        acquire_lock,
-        release_lock,
-        write_json_atomic,
-    )
-    from stateful_dev.state import validate_state
-    from stateful_dev.status import ACTIVE_STATUSES, ELIGIBLE_STATUSES
+    from stateful_dev.cli import _claim_one_item
+    from stateful_dev.locking import FreshLockError, LockError
 
     state_path = Path(payload["state"])
     run_id = payload["run_id"]
 
-    lock_id = f"stateful-dev-claim-{datetime.now(UTC).strftime('%Y%m%dT%H%M%S%fZ')}"
-    lock = None
     try:
-        lock = acquire_lock(state_path.parent, lock_id, timeout_minutes=60)
-        data = _read_state(state_path)
-        result = validate_state(data)
-        if not result.ok:
-            return {"ok": False, "error": "invalid state", "claimed": False}
-
-        # Find active item first
-        for item in data.get("items", []):
-            if item.get("status") in ACTIVE_STATUSES:
-                item["active_run_id"] = run_id
-                item["claimed_at"] = datetime.now(UTC).isoformat()
-                data["updated_at"] = datetime.now(UTC).isoformat()
-                write_json_atomic(state_path, data)
-                return {
-                    "ok": True,
-                    "claimed": True,
-                    "item": {
-                        "id": item["id"],
-                        "title": item.get("title"),
-                        "status": item["status"],
-                        "attempts": item.get("attempts", 0),
-                    },
-                    "run_id": run_id,
-                }
-
-        # Claim first eligible item
-        for item in data.get("items", []):
-            if item.get("status") in ELIGIBLE_STATUSES:
-                item["status"] = "in_progress"
-                item["attempts"] = item.get("attempts", 0) + 1
-                item["active_run_id"] = run_id
-                item["claimed_at"] = datetime.now(UTC).isoformat()
-                data["updated_at"] = datetime.now(UTC).isoformat()
-                write_json_atomic(state_path, data)
-                return {
-                    "ok": True,
-                    "claimed": True,
-                    "item": {
-                        "id": item["id"],
-                        "title": item.get("title"),
-                        "status": "in_progress",
-                        "attempts": item["attempts"],
-                    },
-                    "run_id": run_id,
-                }
-
-        return {"ok": True, "claimed": False, "item": None, "run_id": run_id}
-    except (FreshLockError, LockError) as exc:
+        item, _ = _claim_one_item(_read_state(state_path), state_path, run_id)
+    except (FreshLockError, LockError, ValueError) as exc:
         return {"ok": False, "error": str(exc), "claimed": False}
-    finally:
-        if lock is not None:
-            release_lock(lock)
+
+    if item is None:
+        return {"ok": True, "claimed": False, "item": None, "run_id": run_id}
+    return {"ok": True, "claimed": True, "item": item, "run_id": run_id}
 
 
 # ---------------------------------------------------------------------------
