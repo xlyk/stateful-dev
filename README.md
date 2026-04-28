@@ -49,7 +49,7 @@ For script-backed cron workers, the responsibility boundary is strict:
 | `stateful-dev cron-gate` | deterministic local wake/skip/claim decision engine |
 | Hermes agent | coding executor; does not decide whether work should be claimed |
 
-See [`docs/cron-gate-contract.md`](docs/cron-gate-contract.md) for the scheduler contract and [`docs/cron-gate.md`](docs/cron-gate.md) for the runbook.
+See [`docs/system-integration.md`](docs/system-integration.md) for how `stateful-dev`, Poseidon, Hermes cron, and the Hermes plugin work together. See [`docs/cron-gate-contract.md`](docs/cron-gate-contract.md) for the scheduler contract and [`docs/cron-gate.md`](docs/cron-gate.md) for the runbook.
 
 ## Install
 
@@ -405,6 +405,7 @@ uv run stateful-dev status --state .agent-state/<worker>/state.json --json
 ## Documentation
 
 - [`docs/usage.md`](docs/usage.md) — CLI/plugin usage and disposable smoke flow
+- [`docs/system-integration.md`](docs/system-integration.md) — how stateful-dev, Poseidon, Hermes cron, and the Hermes plugin fit together
 - [`docs/cron-gate-contract.md`](docs/cron-gate-contract.md) — stable wake/skip JSON contract
 - [`docs/cron-gate.md`](docs/cron-gate.md) — script-backed cron gate runbook
 - [`docs/plans/`](docs/plans/) — milestone and backlog plans used to generate worker state
